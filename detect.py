@@ -10,7 +10,7 @@ class VehicleTracker:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # self.notifier.speak("Detection Initiated")
         # Load YOLO model
-        self.model = YOLO('models/yolov8n.pt')  # or 'yolov8n.pt' for less accuracy but faster inference
+        self.model = YOLO('yolo_models/yolov8n.pt')  # or 'yolov8n.pt' for less accuracy but faster inference
         self.model.to(self.device)
         self.frames = [np.random.randint(0, 256, (1080, 1920, 3), dtype=np.uint8)]
         # Tracking parameters
