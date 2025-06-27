@@ -1,19 +1,33 @@
-# Logic to calculate the distance between the car in the pov and the surrounding cars.
-
+import time
+import cv2
 from detect import VehicleTracker
 from extract import FeatureExtractor
 
 class Processor:
     def __init__(self, frame):
-        self.raw_frame = frame # raw frame - unprocessed frame straight from the video
+        self.raw_frame = frame
         self.processed_frame = None
+        self.tracker = VehicleTracker()
 
     def calculate_distance(self):
-        """Detects vehicles in the frame and calculates the distance in pixels between them."""
-        tracker = VehicleTracker()
-        bb_coords = tracker.track(frame=self.raw_frame)
-        self.processed_frame = tracker.draw_bb(frame=self.raw_frame, bounding_box_coords=bb_coords)
+        total_start_time = time.time()
+        
+        bb_coords, detection_time = self.tracker.track(frame=self.raw_frame)
+        self.processed_frame = self.tracker.draw_bb(frame=self.raw_frame.copy(), bounding_box_coords=bb_coords, inference_time=detection_time)
+        
         extractor = FeatureExtractor(frame=self.processed_frame)
-        self.processed_frame = extractor.process_frame()
+        self.processed_frame, feature_time = extractor.process_frame()
+        
+        total_time = time.time() - total_start_time
+        total_fps = 1.0 / total_time if total_time > 0 else 0
+        
+        cv2.putText(self.processed_frame, f"Total FPS: {total_fps:.1f}", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(self.processed_frame, f"Total Time: {total_time*1000:.1f}ms", (10, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        
         return self.processed_frame
-    
+
+    def toggle_vehicle_only(self):
+        return self.tracker.toggle_vehicle_only()
+
+    def get_detection_display(self):
+        return self.tracker.create_detection_display()
