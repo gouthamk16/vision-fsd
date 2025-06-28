@@ -1,8 +1,8 @@
 import time
 import cv2
 import logging
-from detect import VehicleTracker
-from extract import FeatureExtractor
+from fsd.detect import VehicleTracker
+from fsd.extract import FeatureExtractor
 
 class Processor:
     def __init__(self, frame):
