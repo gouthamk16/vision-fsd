@@ -8,15 +8,16 @@ class Processor:
         self.raw_frame = frame
         self.processed_frame = None
         self.tracker = VehicleTracker()
+        self.feature_extractor = FeatureExtractor(frame)
 
-    def calculate_distance(self):
+    def init_process(self):
         total_start_time = time.time()
         
         bb_coords, detection_time = self.tracker.track(frame=self.raw_frame)
         self.processed_frame = self.tracker.draw_bb(frame=self.raw_frame.copy(), bounding_box_coords=bb_coords, inference_time=detection_time)
         
-        extractor = FeatureExtractor(frame=self.processed_frame)
-        self.processed_frame, feature_time = extractor.process_frame()
+        self.feature_extractor.frame = self.processed_frame
+        self.processed_frame, feature_time = self.feature_extractor.process_frame()
         
         total_time = time.time() - total_start_time
         total_fps = 1.0 / total_time if total_time > 0 else 0
@@ -26,8 +27,3 @@ class Processor:
         
         return self.processed_frame
 
-    def toggle_vehicle_only(self):
-        return self.tracker.toggle_vehicle_only()
-
-    def get_detection_display(self):
-        return self.tracker.create_detection_display()

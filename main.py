@@ -2,6 +2,7 @@ import cv2
 import os
 import time
 from process_frame import Processor
+from display import toggle_vehicle_only, get_detection_display, get_trajectory_display
 
 video_path = "data/highway_bridge.mp4"
 output_folder = "output"
@@ -27,9 +28,10 @@ while True:
     else:
         processor.raw_frame = frame
         
-    annotated_frame = processor.calculate_distance()
-    detection_display = processor.get_detection_display()
-    
+    annotated_frame = processor.init_process()
+    detection_display = get_detection_display()
+    trajectory_display = get_trajectory_display()
+
     frame_time = time.time() - frame_start
     
     total_processing_time += frame_time
@@ -42,6 +44,7 @@ while True:
 
     cv2.imshow("Video frame", annotated_frame)
     cv2.imshow("Detection Stats", detection_display)
+    cv2.imshow("Camera Trajectory", trajectory_display)
     
     if frame_count % 30 == 0:
         print(f"Processed {frame_count} frames, Avg FPS: {avg_fps:.2f}")
@@ -50,7 +53,7 @@ while True:
     if key == ord('q'):
         break
     elif key == ord('v'):
-        vehicle_only = processor.toggle_vehicle_only()
+        vehicle_only = toggle_vehicle_only()
         print(f"Vehicle only mode: {'ON' if vehicle_only else 'OFF'}")
 
 total_time = time.time() - start_time
