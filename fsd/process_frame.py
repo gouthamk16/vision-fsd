@@ -20,7 +20,7 @@ class Processor:
             # Step 1: Feature extraction on the raw frame (before any annotation)
             self.feature_extractor.frame = self.raw_frame
             feature_frame, feature_time = self.feature_extractor.process_frame()
-            self.logger.debug(f'Feature extraction completed in {feature_time:.4f}s.')
+            self.logger.debug(f'Feature extraction and matching completed in {feature_time:.4f}s.')
 
             # Step 2: Object detection and annotation on the feature frame
             bb_coords, detection_time = self.tracker.track(frame=self.raw_frame)

@@ -6,9 +6,6 @@ from fsd.logging_utils import setup_logging
 from fsd.process_frame import Processor
 
 def driver(video_path):
-    """
-    Main function to process video frames and calculate distances.
-    """
     video_path = video_path
     log_folder = "logs/"
     os.makedirs(log_folder, exist_ok=True)

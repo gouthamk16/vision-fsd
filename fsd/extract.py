@@ -103,34 +103,80 @@ class FeatureExtractor:
         self.vo = VisualOdometry()
         self.logger = logging.getLogger('FeatureExtractor')
         self.logger.debug('FeatureExtractor initialized.')
+        self.prev_frame = None
+        self.prev_kp = None
+        self.prev_desc = None
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         
     def extract_features(self):
         gray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
-        corners = cv2.goodFeaturesToTrack(image=gray, maxCorners=300, qualityLevel=0.01, minDistance=10)
+        corners = cv2.goodFeaturesToTrack(image=gray, maxCorners=500, qualityLevel=0.01, minDistance=5)
+        # Extracting keypoints from corner coords
+        kps = []
+        for c in corners:
+            x, y = c.ravel()
+            kps.append(cv2.KeyPoint(x=float(x), y=float(y), size=20))
+        self.logger.debug(f"Keypoints extracted.")
+        # Extracting descriptors from keypoints
+        ord = cv2.ORB_create(nfeatures=1000)
+        kps, descs = ord.compute(gray, kps)
+        self.logger.debug(f"Descriptors extracted.")
+        # Extracting edges from the frame
         if corners is not None:
             corners = np.intp(corners)
         else:
             corners = np.array([])
         edges = cv2.Canny(image=gray, threshold1=100, threshold2=200, L2gradient=True)
-        return corners, edges
+        return corners, edges, kps, descs
+
+    def get_matched_points(self, kp1, kp2, matches):
+        if len(matches) < 8:
+            return None, None
+        pts1 = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+        pts2 = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+        return pts1, pts2
+
+    def match_features(self, desc1, desc2):
+        if desc1 is None or desc2 is None:
+            return []
+        matches = self.bf.match(desc1, desc2)
+        matches = sorted(matches, key=lambda x: x.distance)
+        good_matches = matches[:min(len(matches), 100)]
+        return good_matches
         
     def process_frame(self):
         start_time = time.time()
         
-        vo_frame, vo_time, matches = self.vo.process_frame(self.frame)
+        _, _, kps, descs = self.extract_features()        
+        self.logger.debug("Feature extraction completed.")
         
-        corners1, edges1 = self.extract_features()
+        if self.prev_frame is None:
+            self.prev_frame = self.frame
+            self.prev_kp = kps
+            self.prev_desc = descs
+            self.logger.debug('First frame processed in FeatureExtractor.')
+            return self.frame, 0  # Return only two values
 
-        for feature in corners1:
-            fx, fy = feature.ravel()
-            cv2.circle(vo_frame, (fx, fy), 3, (255, 0, 0), 2)
+        matches = self.match_features(self.prev_desc, descs)
+        pts1, pts2 = self.get_matched_points(self.prev_kp, kps, matches)
+        self.logger.debug(f"Features matched.")
 
-        edges_colored = np.zeros_like(vo_frame)
-        edges_colored[edges1 != 0] = [0, 0, 255]
-        final_frame = cv2.addWeighted(vo_frame, 0.8, edges_colored, 0.2, 0)
-        
+        # R, T = np.eye(3), np.zeros((3, 1)) # Rotation and translation matrices
+        num_matches = len(matches)
+        self.logger.debug(f"Number of matches: {num_matches}")
+
+        annotated_frame = self.frame.copy()
+        for i, match in enumerate(matches[:50]):
+            pt1 = tuple(map(int, self.prev_kp[match.queryIdx].pt))
+            pt2 = tuple(map(int, kps[match.trainIdx].pt))
+            cv2.circle(annotated_frame, pt2, 1, (0, 255, 0), -1)
+            cv2.line(annotated_frame, pt1, pt2, (255, 0, 0), 1)
+
+        final_frame = annotated_frame
         processing_time = time.time() - start_time
-        
-        self.logger.debug(f'Feature extraction and overlay completed in {processing_time:.4f}s.')
-        
+
+        self.prev_frame = self.frame
+        self.prev_kp = kps
+        self.prev_desc = descs
+                
         return final_frame, processing_time

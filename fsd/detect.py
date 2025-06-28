@@ -70,21 +70,3 @@ class VehicleTracker:
         except Exception as e:
             self.logger.exception(f'Error during tracking: {e}')
             raise
-
-    def create_detection_display(self, width=400, height=300):
-        display = np.zeros((height, width, 3), dtype=np.uint8)
-        display.fill(50)
-        
-        cv2.putText(display, "Real-time Detections", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        y_offset = 60
-        for obj_name, count in self.detected_objects.items():
-            if obj_name != "Unknown":
-                text = f"{obj_name}: {count}"
-                cv2.putText(display, text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
-                y_offset += 30
-                
-        if not self.detected_objects:
-            cv2.putText(display, "No objects detected", (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
-            
-        return display
