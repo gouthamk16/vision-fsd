@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import time
+import logging
 
 class VisualOdometry:
     def __init__(self):
@@ -14,6 +15,8 @@ class VisualOdometry:
                                      [0, 0, 1]], dtype=np.float32)
         self.trajectory = []
         self.current_pose = np.eye(4)
+        self.logger = logging.getLogger('VisualOdometry')
+        self.logger.debug('VisualOdometry initialized.')
         
     def extract_features(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -59,6 +62,7 @@ class VisualOdometry:
             self.prev_frame = frame
             self.prev_kp = kp
             self.prev_desc = desc
+            self.logger.debug('First frame processed in VisualOdometry.')
             return frame, 0, 0
         
         start_time = time.time()
@@ -88,58 +92,18 @@ class VisualOdometry:
         self.prev_kp = kp
         self.prev_desc = desc
         
+        self.logger.debug(f'Frame processed in {processing_time:.4f}s with {num_matches} matches.')
+        
         return annotated_frame, processing_time, num_matches
     
-    def draw_trajectory(self, width=400, height=300):
-        traj_img = np.zeros((height, width, 3), dtype=np.uint8)
-        
-        if len(self.trajectory) < 2:
-            cv2.putText(traj_img, "Building trajectory...", (10, height//2), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            return traj_img
-        
-        points = np.array(self.trajectory)
-        
-        if len(points) > 1:
-            min_x, max_x = points[:, 0].min(), points[:, 0].max()
-            min_z, max_z = points[:, 2].min(), points[:, 2].max()
-            
-            if max_x - min_x > 0 and max_z - min_z > 0:
-                scale_x = (width - 40) / (max_x - min_x)
-                scale_z = (height - 40) / (max_z - min_z)
-                scale = min(scale_x, scale_z)
-            else:
-                scale = 1
-            
-            center_x = width // 2
-            center_z = height // 2
-            
-            for i in range(1, len(points)):
-                x1 = int(center_x + (points[i-1][0] - points[0][0]) * scale)
-                z1 = int(center_z - (points[i-1][2] - points[0][2]) * scale)
-                x2 = int(center_x + (points[i][0] - points[0][0]) * scale)
-                z2 = int(center_z - (points[i][2] - points[0][2]) * scale)
-                
-                cv2.line(traj_img, (x1, z1), (x2, z2), (0, 255, 0), 2)
-                cv2.circle(traj_img, (x2, z2), 3, (0, 0, 255), -1)
-        
-        current_pos = self.current_pose[:3, 3]
-        cv2.putText(traj_img, f"X: {current_pos[0]:.2f}", (10, 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        cv2.putText(traj_img, f"Y: {current_pos[1]:.2f}", (10, 35), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        cv2.putText(traj_img, f"Z: {current_pos[2]:.2f}", (10, 50), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        cv2.putText(traj_img, f"Points: {len(self.trajectory)}", (10, 70), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        
-        return traj_img
 
 class FeatureExtractor:
     def __init__(self, frame):
         self.frame = frame
         self.vo = VisualOdometry()
-
+        self.logger = logging.getLogger('FeatureExtractor')
+        self.logger.debug('FeatureExtractor initialized.')
+        
     def extract_features(self):
         gray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
         corners = cv2.goodFeaturesToTrack(image=gray, maxCorners=300, qualityLevel=0.01, minDistance=10)
@@ -167,12 +131,6 @@ class FeatureExtractor:
         
         processing_time = time.time() - start_time
         
-        cv2.putText(final_frame, f"Matches: {matches}", (10, 300), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-        cv2.putText(final_frame, f"VO Time: {vo_time*1000:.1f}ms", (10, 320), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
- 
+        self.logger.debug(f'Feature extraction and overlay completed in {processing_time:.4f}s.')
+        
         return final_frame, processing_time
-    
-    def get_trajectory_display(self):
-        return self.vo.draw_trajectory()

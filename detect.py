@@ -3,6 +3,7 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import time
+import logging
 
 class VehicleTracker:
     def __init__(self, confidence_threshold=0.4):
@@ -13,16 +14,14 @@ class VehicleTracker:
         self.vehicle_classes = [0, 1, 2, 3, 5, 7]  # Person, Bicycle, Car, Motorcycle, Bus, Truck
         self.pure_vehicle_classes = [1, 2, 3, 5, 7]  # Excluding Person (0)
         self.classMap = {0: "Person", 1: "Bicycle", 2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck", 100: "NA"}
-        self.vehicle_only = False
         self.detected_objects = {}
-
-    def toggle_vehicle_only(self):
-        self.vehicle_only = not self.vehicle_only
-        return self.vehicle_only
+        self.logger = logging.getLogger('VehicleTracker')
+        self.logger.debug('VehicleTracker initialized.')
 
     def draw_bb(self, frame, bounding_box_coords, inference_time):
         current_objects = []
         self.detected_objects = {}
+        self.logger.debug(f'Drawing bounding boxes. Inference time: {inference_time:.4f}s')
         
         for result in bounding_box_coords:
             boxes = result.boxes
@@ -36,7 +35,7 @@ class VehicleTracker:
                 self.detected_objects[class_name] += 1
                 
                 # Filter based on vehicle_only mode
-                if self.vehicle_only and cls not in self.pure_vehicle_classes:
+                if cls not in self.pure_vehicle_classes:
                     continue
                     
                 if cls in self.vehicle_classes:
@@ -56,20 +55,21 @@ class VehicleTracker:
         cv2.putText(frame, f"Time: {inference_time*1000:.1f}ms", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame, f"Objects: {len(current_objects)}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        mode_text = "Vehicles Only" if self.vehicle_only else "All Objects"
-        cv2.putText(frame, f"Mode: {mode_text}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        cv2.putText(frame, "Press 'v' to toggle vehicles only", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
+        self.logger.debug(f"Objects detected: {self.detected_objects}")
         return frame
         
     def track(self, frame, target_fps=10):
         start_time = time.time()
-        # Removed the problematic line: self.frames.append(frame)
-        # Process the frame directly without storing it
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.model(frame_rgb, verbose=False)
-        inference_time = time.time() - start_time
-        return results, inference_time
+        self.logger.debug('Tracking frame.')
+        try:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.model(frame_rgb, verbose=False)
+            inference_time = time.time() - start_time
+            self.logger.debug(f'Inference completed in {inference_time:.4f}s.')
+            return results, inference_time
+        except Exception as e:
+            self.logger.exception(f'Error during tracking: {e}')
+            raise
 
     def create_detection_display(self, width=400, height=300):
         display = np.zeros((height, width, 3), dtype=np.uint8)
