@@ -17,12 +17,9 @@ class Processor:
         total_start_time = time.time()
         self.logger.debug('Starting calculate_distance.')
         try:
-            # Step 1: Feature extraction on the raw frame (before any annotation)
             self.feature_extractor.frame = self.raw_frame
             feature_frame, feature_time = self.feature_extractor.process_frame()
             self.logger.debug(f'Feature extraction and matching completed in {feature_time:.4f}s.')
-
-            # Step 2: Object detection and annotation on the feature frame
             bb_coords, detection_time = self.tracker.track(frame=self.raw_frame)
             self.logger.debug(f'Object detection completed in {detection_time:.4f}s.')
             self.processed_frame = self.tracker.draw_bb(frame=feature_frame, bounding_box_coords=bb_coords, inference_time=detection_time)
