@@ -2,33 +2,44 @@ import time
 import cv2
 import logging
 from fsd.detect import VehicleTracker
-from fsd.extract import FeatureExtractor
+from fsd.extract import VisualOdometry as FeatureExtractor 
 
-class Processor:
-    def __init__(self, frame):
-        self.raw_frame = frame
-        self.processed_frame = None
-        self.tracker = VehicleTracker()
-        self.feature_extractor = FeatureExtractor(frame)
-        self.logger = logging.getLogger('Processor')
-        self.logger.debug('Processor initialized.')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-    def calculate_distance(self):
+class FrameProcessor:
+    def __init__(self, frame_height, frame_width):
+        self.logger = logging.getLogger('FrameProcessor')
+        self.tracker = VehicleTracker() 
+        self.feature_extractor = FeatureExtractor(focal_length=(1000, 1000), principal_point=(frame_width // 2, frame_height // 2))
+        self.logger.info('FrameProcessor initialized successfully.')
+
+    def process(self, frame):
         total_start_time = time.time()
-        self.logger.debug('Starting calculate_distance.')
+        self.logger.debug('Starting frame processing.')
+        
         try:
-            self.feature_extractor.frame = self.raw_frame
-            feature_frame, feature_time = self.feature_extractor.process_frame()
-            self.logger.debug(f'Feature extraction and matching completed in {feature_time:.4f}s.')
-            bb_coords, detection_time = self.tracker.track(frame=self.raw_frame)
-            self.logger.debug(f'Object detection completed in {detection_time:.4f}s.')
-            self.processed_frame = self.tracker.draw_bb(frame=feature_frame, bounding_box_coords=bb_coords, inference_time=detection_time)
+            feature_frame, _, _, feature_time = self.feature_extractor.process_frame(frame)
+            self.logger.debug(f'Feature extraction completed in {feature_time*1000:.2f}ms.')
+            
+            bb_coords, detection_time = self.tracker.track(frame=frame)
+            self.logger.debug(f'Object detection completed in {detection_time*1000:.2f}ms.')
+            
+            processed_frame = self.tracker.draw_bb(
+                frame=feature_frame, 
+                bounding_box_coords=bb_coords, 
+                inference_time=detection_time
+            )
+
         except Exception as e:
-            self.logger.exception(f'Error in calculate_distance: {e}')
-            raise
+            self.logger.exception(f'Error during frame processing: {e}')
+            return frame
+
         total_time = time.time() - total_start_time
         total_fps = 1.0 / total_time if total_time > 0 else 0
-        cv2.putText(self.processed_frame, f"Total FPS: {total_fps:.1f}", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        cv2.putText(self.processed_frame, f"Total Time: {total_time*1000:.1f}ms", (10, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        self.logger.debug(f'Frame processed in {total_time:.4f}s (Total FPS: {total_fps:.2f})')
-        return self.processed_frame
+        
+        cv2.putText(processed_frame, f"Total FPS: {total_fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        cv2.putText(processed_frame, f"Total Time: {total_time*1000:.1f}ms", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        
+        self.logger.debug(f'Frame processed in {total_time*1000:.2f}ms (FPS: {total_fps:.2f})')
+        
+        return processed_frame

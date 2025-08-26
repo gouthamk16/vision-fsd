@@ -3,7 +3,7 @@ import os
 import time
 import logging
 from fsd.logging_utils import setup_logging
-from fsd.process_frame import Processor
+from fsd.process_frame import FrameProcessor
 
 def driver(video_path):
     video_path = video_path
@@ -30,13 +30,12 @@ def driver(video_path):
         frame_start = time.time()
         if processor is None:
             logger.debug("Initializing Processor for the first frame.")
-            processor = Processor(frame)
+            processor = FrameProcessor(frame_height=frame.shape[0], frame_width=frame.shape[1])
         else:
-            processor.raw_frame = frame
             logger.debug(f"Processing frame {frame_count+1}")
         
         try:
-            annotated_frame = processor.calculate_distance()
+            annotated_frame = processor.process(frame)
         except Exception as e:
             logger.exception(f"Error processing frame {frame_count+1}: {e}")
             break
