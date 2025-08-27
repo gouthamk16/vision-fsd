@@ -39,8 +39,8 @@ class FrameProcessor:
         total_time = time.time() - total_start_time
         total_fps = 1.0 / total_time if total_time > 0 else 0
         
-        cv2.putText(processed_frame, f"Total FPS: {total_fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        cv2.putText(processed_frame, f"Total Time: {total_time*1000:.1f}ms", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        # cv2.putText(processed_frame, f"Total FPS: {total_fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        # cv2.putText(processed_frame, f"Total Time: {total_time*1000:.1f}ms", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         
         self.logger.debug(f'Frame processed in {total_time*1000:.2f}ms (FPS: {total_fps:.2f})')
         
