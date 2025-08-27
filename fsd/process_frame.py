@@ -4,7 +4,7 @@ import time
 import cv2
 from fsd.logging_utils import get_logger
 from fsd.detect import VehicleTracker
-from fsd.extract import VisualOdometry as FeatureExtractor 
+from fsd.vision import VisualOdometry as FeatureExtractor 
 
 load_dotenv()
 

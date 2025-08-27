@@ -22,6 +22,7 @@ class VisualOdometry:
         self.logger.debug(f"Camera matrix initialized:\n{self.K}")
         self.prev_kp = None
         self.prev_desc = None
+        self.frames = []
         
         # Using SIFT for feature detection and description
         self.sift = cv2.SIFT_create(
@@ -60,30 +61,12 @@ class VisualOdometry:
                 m, n = match_pair
                 if m.distance < 0.7 * n.distance:
                     good_matches.append(m)
-        
+        if len(good_matches) > 0:
+            self.logger.debug(f"Found {len(good_matches)} good matches.")
         return good_matches
 
-    def process_frame(self, frame):
-        """
-        Processes a new frame to estimate camera motion and returns the annotated frame.
-        """
-        start_time = time.time()
-        
-        # Extract features from the current frame
-        kps, descs = self._extract_features(frame)
-        
-        # If this is the first frame, just store its features and return
-        if self.prev_desc is None:
-            self.prev_kp = kps
-            self.prev_desc = descs
-            self.logger.debug('First frame processed. Storing features.')
-            return frame, np.identity(3), np.zeros((3, 1)), 0
-
-        # Match features with the previous frame
-        matches = self._match_features(self.prev_desc, descs)
-        self.logger.debug(f"Found {len(matches)} good matches.")
-
-        # Recover pose if enough matches are found
+    def _recover_pose(self, kps, matches):
+        """Recovers the camera pose from matched keypoints."""
         R, t = np.identity(3), np.zeros((3, 1))
         if len(matches) > 8:
             # Get coordinates of matched keypoints
@@ -98,15 +81,53 @@ class VisualOdometry:
                 _, R, t, pose_mask = cv2.recoverPose(E, pts2, pts1, self.K)
                 if mask is None:
                     mask = pose_mask
+                    return matches, R, t
                 if mask is not None:
                     mask = mask.ravel()
                     inlier_matches = [m for i, m in enumerate(matches) if mask[i]==1]
                     self.logger.debug(f"Found {len(inlier_matches)} inlier matches.")
+                    return inlier_matches, R, t
                 self.logger.debug(f"Motion recovered. Translation: {t.flatten()}")
             else:
                 self.logger.warning("Could not compute Essential Matrix.")
         else:
             self.logger.warning(f"Not enough matches ({len(matches)}) to estimate motion.")
+    
+    def triangulate(self, R, t, kps, matches):
+        # Projection matrices for the reference, current frame
+        projection_matrix_p1 = self.K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+        projection_matrix_p2 = self.K @ np.hstack([R, t])
+        # Matched keypoints
+        kp1 = np.float32([self.prev_kp[m.queryIdx].pt for m in matches])
+        kp2 = np.float32([kps[m.trainIdx].pt for m in matches])
+        homogenous_coords = cv2.triangulatePoints(projection_matrix_p1, projection_matrix_p2, kp1, kp2)
+        # Convert homogenous coords to cartesian.
+        points_3d = (homogenous_coords / homogenous_coords[3])
+        points_3d = points_3d[:3, :].T
+        return points_3d
+
+
+    def process_frame(self, frame):
+        """
+        Processes a new frame to estimate camera motion and returns the annotated frame.
+        """
+        start_time = time.time()
+        self.frames.append(frame)
+        
+        # Extract features from the current frame
+        kps, descs = self._extract_features(frame)
+        
+        # If this is the first frame, just store its features and return
+        if self.prev_desc is None:
+            self.prev_kp = kps
+            self.prev_desc = descs
+            self.logger.debug('First frame processed. Storing features.')
+            return frame, np.identity(3), np.zeros((3, 1)), 0
+
+        # Match features with the previous frame
+        matches = self._match_features(self.prev_desc, descs)
+        # Recover pose if enough matches are found
+        inlier_matches, R, t = self._recover_pose(kps, matches)
 
         # Draw matches on the frame
         annotated_frame = frame.copy()
