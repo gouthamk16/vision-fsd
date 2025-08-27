@@ -1,9 +1,13 @@
-import cv2
 import os
+from dotenv import load_dotenv
+import cv2
 import time
-import logging
-from fsd.logging_utils import setup_logging
+from fsd.logging_utils import setup_logging, get_logger
+
+load_dotenv()
 from fsd.process_frame import FrameProcessor
+
+load_dotenv()
 
 def driver(video_path):
     video_path = video_path
@@ -11,7 +15,7 @@ def driver(video_path):
     os.makedirs(log_folder, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     setup_logging(os.path.join(log_folder, f'app_{timestamp}.log'))
-    logger = logging.getLogger('driver')
+    logger = get_logger('driver')
 
     cap = cv2.VideoCapture(video_path)
     frame_count = 0
@@ -32,7 +36,7 @@ def driver(video_path):
             logger.debug("Initializing Processor for the first frame.")
             processor = FrameProcessor(frame_height=frame.shape[0], frame_width=frame.shape[1])
         else:
-            logger.debug(f"Processing frame {frame_count+1}")
+            logger.info(f"Processing frame {frame_count+1}")
         
         try:
             annotated_frame = processor.process(frame)
@@ -41,7 +45,7 @@ def driver(video_path):
             break
         
         frame_time = time.time() - frame_start
-        logger.debug(f"Frame {frame_count+1} processed in {frame_time:.4f}s")
+        logger.info(f"Frame {frame_count+1} processed in {frame_time:.4f}s")
         
         total_processing_time += frame_time
         frame_count += 1

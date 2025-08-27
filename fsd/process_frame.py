@@ -1,14 +1,16 @@
+import os
+from dotenv import load_dotenv
 import time
 import cv2
-import logging
+from fsd.logging_utils import get_logger
 from fsd.detect import VehicleTracker
 from fsd.extract import VisualOdometry as FeatureExtractor 
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+load_dotenv()
 
 class FrameProcessor:
     def __init__(self, frame_height, frame_width):
-        self.logger = logging.getLogger('FrameProcessor')
+        self.logger = get_logger('FrameProcessor')
         self.tracker = VehicleTracker() 
         self.feature_extractor = FeatureExtractor(focal_length=(1000, 1000), principal_point=(frame_width // 2, frame_height // 2))
         self.logger.info('FrameProcessor initialized successfully.')
@@ -21,7 +23,7 @@ class FrameProcessor:
             feature_frame, _, _, feature_time = self.feature_extractor.process_frame(frame)
             self.logger.debug(f'Feature extraction completed in {feature_time*1000:.2f}ms.')
             
-            bb_coords, detection_time = self.tracker.track(frame=frame)
+            bb_coords, detection_time = self.tracker.detect_bb(frame=frame)
             self.logger.debug(f'Object detection completed in {detection_time*1000:.2f}ms.')
             
             processed_frame = self.tracker.draw_bb(

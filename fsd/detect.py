@@ -1,9 +1,13 @@
+import os
+from dotenv import load_dotenv
 import torch
 from ultralytics import YOLO
 import cv2
 import numpy as np
 import time
-import logging
+from fsd.logging_utils import get_logger
+
+load_dotenv()
 
 class VehicleTracker:
     def __init__(self, confidence_threshold=0.4):
@@ -15,8 +19,8 @@ class VehicleTracker:
         self.pure_vehicle_classes = [1, 2, 3, 5, 7]  # Excluding Person (0)
         self.classMap = {0: "Person", 1: "Bicycle", 2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck", 100: "NA"}
         self.detected_objects = {}
-        self.logger = logging.getLogger('VehicleTracker')
-        self.logger.debug('VehicleTracker initialized.')
+        self.logger = get_logger('VehicleTracker')
+        self.logger.info('VehicleTracker initialized.')
 
     def draw_bb(self, frame, bounding_box_coords, inference_time):
         current_objects = []
@@ -58,14 +62,14 @@ class VehicleTracker:
         self.logger.debug(f"Objects detected: {self.detected_objects}")
         return frame
         
-    def track(self, frame, target_fps=10):
+    def detect_bb(self, frame, target_fps=10):
         start_time = time.time()
-        self.logger.debug('Tracking frame.')
+        self.logger.debug('Tracking frame for object detection')
         try:
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.model(frame_rgb, verbose=False)
             inference_time = time.time() - start_time
-            self.logger.debug(f'Inference completed in {inference_time:.4f}s.')
+            self.logger.debug(f'YOLO Inference completed in {inference_time:.4f}s.')
             return results, inference_time
         except Exception as e:
             self.logger.exception(f'Error during tracking: {e}')

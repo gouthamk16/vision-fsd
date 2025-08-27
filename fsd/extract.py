@@ -1,9 +1,11 @@
+import os
+from dotenv import load_dotenv
 import cv2
 import numpy as np
 import time
-import logging
+from fsd.logging_utils import get_logger
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+load_dotenv()
 
 class VisualOdometry:
     """
@@ -11,7 +13,7 @@ class VisualOdometry:
     and estimates the camera's motion.
     """
     def __init__(self, focal_length, principal_point):
-        self.logger = logging.getLogger('VisualOdometry')
+        self.logger = get_logger('VisualOdometry')
         
         # Camera Intrinsics
         self.K = np.array([[focal_length[0], 0, principal_point[0]],
@@ -23,7 +25,7 @@ class VisualOdometry:
         
         # Using SIFT for feature detection and description
         self.sift = cv2.SIFT_create(
-            nfeatures=2000,
+            nfeatures=2800,
             nOctaveLayers=3,
             contrastThreshold=0.04,
             edgeThreshold=10,
@@ -33,9 +35,8 @@ class VisualOdometry:
         # Using FLANN for fast feature matching
         FLANN_INDEX_KDTREE = 1
         index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-        search_params = dict(checks=50)
+        search_params = dict(checks=75)
         self.flann = cv2.FlannBasedMatcher(index_params, search_params)
-        
         self.logger.info('VisualOdometry initialized.')
 
     def _extract_features(self, frame):
@@ -57,10 +58,9 @@ class VisualOdometry:
         for match_pair in matches:
             if len(match_pair) == 2:
                 m, n = match_pair
-                if m.distance < 0.75 * n.distance:
+                if m.distance < 0.7 * n.distance:
                     good_matches.append(m)
         
-        self.logger.debug(f"Found {len(good_matches)} good matches.")
         return good_matches
 
     def process_frame(self, frame):
@@ -81,6 +81,7 @@ class VisualOdometry:
 
         # Match features with the previous frame
         matches = self._match_features(self.prev_desc, descs)
+        self.logger.debug(f"Found {len(matches)} good matches.")
 
         # Recover pose if enough matches are found
         R, t = np.identity(3), np.zeros((3, 1))
@@ -94,7 +95,13 @@ class VisualOdometry:
             
             if E is not None:
                 # Recover Rotation and Translation 
-                _, R, t, mask = cv2.recoverPose(E, pts2, pts1, self.K)
+                _, R, t, pose_mask = cv2.recoverPose(E, pts2, pts1, self.K)
+                if mask is None:
+                    mask = pose_mask
+                if mask is not None:
+                    mask = mask.ravel()
+                    inlier_matches = [m for i, m in enumerate(matches) if mask[i]==1]
+                    self.logger.debug(f"Found {len(inlier_matches)} inlier matches.")
                 self.logger.debug(f"Motion recovered. Translation: {t.flatten()}")
             else:
                 self.logger.warning("Could not compute Essential Matrix.")
@@ -103,8 +110,10 @@ class VisualOdometry:
 
         # Draw matches on the frame
         annotated_frame = frame.copy()
+        # sort inliers by descriptor match distance (best first) for nicer viz
+        inlier_matches = sorted(inlier_matches, key=lambda m: m.distance)[:100]
         # Draw lines for the top 100 matches
-        for match in matches[:100]:
+        for match in inlier_matches:
             pt1 = tuple(map(int, self.prev_kp[match.queryIdx].pt))
             pt2 = tuple(map(int, kps[match.trainIdx].pt))
             cv2.line(annotated_frame, pt1, pt2, (255, 0, 0), 1) 
