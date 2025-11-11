@@ -20,7 +20,9 @@ class FrameProcessor:
         self.logger.debug('Starting frame processing.')
         
         try:
-            feature_frame, _, _, feature_time = self.feature_extractor.process_frame(frame)
+            # If the image has an overall darkened hue, then use the image decomposition method to increase vsibility (i.e., nighttime image enhancement)
+            # frame = something.enhance_image(frame)
+            feature_frame, _, _, feature_time, success = self.feature_extractor.process_frame(frame)
             self.logger.debug(f'Feature extraction completed in {feature_time*1000:.2f}ms.')
             
             bb_coords, detection_time = self.tracker.detect_bb(frame=frame)
@@ -38,10 +40,7 @@ class FrameProcessor:
 
         total_time = time.time() - total_start_time
         total_fps = 1.0 / total_time if total_time > 0 else 0
-        
-        # cv2.putText(processed_frame, f"Total FPS: {total_fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        # cv2.putText(processed_frame, f"Total Time: {total_time*1000:.1f}ms", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        
+    
         self.logger.debug(f'Frame processed in {total_time*1000:.2f}ms (FPS: {total_fps:.2f})')
         
         return processed_frame
