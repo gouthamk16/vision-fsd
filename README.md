@@ -2,6 +2,8 @@
 
 Fully vision based path tracking and env mapping for fsd.
 
+This project is a part of a full blown FSD workflow comprising of multiple projects (github.com/gouthamk16/Slam, github.com/gouthamk16/drive-vlm, github.com/gouthamk16/xdrive etc)
+
 ## Run an example
 ```bash
 <activate virtual env>
