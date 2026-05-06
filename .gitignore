@@ -3,5 +3,9 @@ __pycache__/
 data/
 models/
 output/
+outputs/
+.claude/
 logs/
 out_final/
+*.pt
+.env

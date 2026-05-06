@@ -6,8 +6,6 @@ import time
 from fsd.logging_utils import get_logger
 from collections import deque
 
-
-
 load_dotenv()
 
 class VisualOdometry:

@@ -9,8 +9,34 @@ from fsd.process_frame import FrameProcessor
 
 load_dotenv()
 
-def driver(video_path):
-    video_path = video_path
+def _resize_for_processing(frame, max_width=1920, max_height=1080):
+    height, width = frame.shape[:2]
+    scale = min(max_width / width, max_height / height, 1.0)
+    if scale == 1.0:
+        return frame
+
+    resized_width = int(width * scale)
+    resized_height = int(height * scale)
+    return cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+
+
+def _make_output_path(video_path, timestamp):
+    os.makedirs("outputs", exist_ok=True)
+    name = os.path.splitext(os.path.basename(video_path))[0]
+    return os.path.join("outputs", f"{name}_processed_{timestamp}.mp4")
+
+
+def driver(
+    video_path,
+    mode="stream",
+    output_path=None,
+    max_frames=None,
+    target_motion_fps=20,
+    high_fps_threshold=45,
+):
+    if mode not in {"stream", "save"}:
+        raise ValueError("mode must be either 'stream' or 'save'")
+
     log_folder = "logs/"
     os.makedirs(log_folder, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -18,61 +44,131 @@ def driver(video_path):
     logger = get_logger('driver')
 
     cap = cv2.VideoCapture(video_path)
-    frame_count = 0
+    if not cap.isOpened():
+        logger.error(f"Could not open video: {video_path}")
+        return
+
+    if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+        cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+
+    source_fps = cap.get(cv2.CAP_PROP_FPS)
+    source_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    source_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    source_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_stride = 1
+    if source_fps and source_fps >= high_fps_threshold:
+        frame_stride = max(1, round(source_fps / target_motion_fps))
+    output_fps = source_fps if source_fps else target_motion_fps
+
+    source_frame_count = 0
+    processed_frame_count = 0
     total_processing_time = 0
     processor = None
+    writer = None
+    if mode == "save" and output_path is None:
+        output_path = _make_output_path(video_path, timestamp)
 
-    logger.info(f"Starting video processing...")
+    logger.info(f"Starting video processing: {video_path} ({mode})")
+    logger.info(
+        f"Video metadata: {source_width}x{source_height}, "
+        f"{source_fps:.2f} FPS, {source_frames} frames, stride={frame_stride}"
+    )
+    if mode == "save":
+        logger.info(
+            f"Saving processed video to {output_path} at {output_fps:.2f} FPS "
+            f"with {frame_stride} output frame(s) per processed frame"
+        )
     start_time = time.time()
+    end_of_video = False
 
     while True:
+        if max_frames is not None and processed_frame_count >= max_frames:
+            logger.info(f"Reached requested processed frame limit: {max_frames}")
+            break
+
         ret, frame = cap.read()
         if not ret:
             logger.info("No more frames to read. Exiting loop.")
             break
 
+        source_frame_count += 1
+        frame = _resize_for_processing(frame)
         frame_start = time.time()
         if processor is None:
             logger.debug("Initializing Processor for the first frame.")
             processor = FrameProcessor(frame_height=frame.shape[0], frame_width=frame.shape[1])
         else:
-            logger.info(f"Processing frame {frame_count+1}")
+            logger.info(f"Processing frame {processed_frame_count+1} (source frame {source_frame_count})")
         
         try:
             annotated_frame = processor.process(frame)
         except Exception as e:
-            logger.exception(f"Error processing frame {frame_count+1}: {e}")
+            logger.exception(f"Error processing frame {processed_frame_count+1}: {e}")
             break
         
         frame_time = time.time() - frame_start
-        logger.info(f"Frame {frame_count+1} processed in {frame_time:.4f}s")
+        logger.info(f"Frame {processed_frame_count+1} processed in {frame_time:.4f}s")
         
         total_processing_time += frame_time
-        frame_count += 1
+        processed_frame_count += 1
         
-        avg_fps = frame_count / total_processing_time if total_processing_time > 0 else 0
+        avg_fps = processed_frame_count / total_processing_time if total_processing_time > 0 else 0
         
         cv2.putText(annotated_frame, f"Avg FPS: {avg_fps:.1f}", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(annotated_frame, f"Frame: {frame_count}", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(annotated_frame, f"Frame: {processed_frame_count}", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-        cv2.imshow("Video frame", annotated_frame)
+        if mode == "save":
+            if writer is None:
+                output_dir = os.path.dirname(output_path)
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                height, width = annotated_frame.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(output_path, fourcc, output_fps, (width, height))
+                if not writer.isOpened():
+                    logger.error(f"Could not open video writer: {output_path}")
+                    break
+            for _ in range(frame_stride):
+                writer.write(annotated_frame)
+        else:
+            cv2.imshow("Video frame", annotated_frame)
         
-        if frame_count % 30 == 0:
-            logger.info(f"Processed {frame_count} frames, Avg FPS: {avg_fps:.2f}")
+        if processed_frame_count % 30 == 0:
+            logger.info(f"Processed {processed_frame_count} frames, Avg FPS: {avg_fps:.2f}")
 
-        key = cv2.waitKey(15)
-        if key == ord('q'):
-            logger.info("'q' pressed. Exiting.")
+        if mode == "stream":
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                logger.info("'q' pressed. Exiting.")
+                break
+
+        for _ in range(frame_stride - 1):
+            if not cap.grab():
+                end_of_video = True
+                break
+            source_frame_count += 1
+
+        if end_of_video:
+            logger.info("No more frames to read. Exiting loop.")
             break
 
     total_time = time.time() - start_time
-    final_avg_fps = frame_count / total_time if total_time > 0 else 0
+    final_avg_fps = processed_frame_count / total_time if total_time > 0 else 0
 
     logger.info(f"Processing complete!")
-    logger.info(f"Total frames: {frame_count}")
+    logger.info(f"Total source frames read: {source_frame_count}")
+    logger.info(f"Total processed frames: {processed_frame_count}")
     logger.info(f"Total time: {total_time:.2f}s")
     logger.info(f"Average FPS: {final_avg_fps:.2f}")
-    logger.info(f"Processing FPS: {frame_count/total_processing_time:.2f}")
+    if total_processing_time > 0:
+        logger.info(f"Processing FPS: {processed_frame_count/total_processing_time:.2f}")
+    if output_path:
+        logger.info(f"Output video: {output_path}")
 
     cap.release()
-    cv2.destroyAllWindows()
+    if writer is not None:
+        writer.release()
+    if mode == "stream":
+        cv2.destroyAllWindows()
+
+    return output_path if mode == "save" else None

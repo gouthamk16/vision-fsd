@@ -8,7 +8,7 @@ This project/repo is a research/testing arena for a full blown FSD workflow comp
 ```bash
 <activate virtual env>
 pip3 install -r requirements.txt
-python3 main.py
+python3 main.py -- help
 ```
 
 ### todo
