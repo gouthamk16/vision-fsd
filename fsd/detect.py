@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+import numpy as np
 import torch
 from ultralytics import YOLO
 import cv2
@@ -48,7 +49,36 @@ class VehicleTracker:
             f"half={self.use_half}, end_to_end={self.end_to_end}, tracking={self.enable_tracking}."
         )
 
-    def draw_bb(self, frame, bounding_box_coords, inference_time):
+    def _estimate_object_position(self, depth_map, box, frame_shape):
+        if depth_map is None:
+            return None
+
+        x, y, w, h = box
+        frame_height, frame_width = frame_shape[:2]
+        x1 = max(0, x + int(w * 0.25))
+        x2 = min(frame_width, x + int(w * 0.75))
+        y1 = max(0, y + int(h * 0.35))
+        y2 = min(frame_height, y + int(h * 0.85))
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        depth_roi = depth_map[y1:y2, x1:x2]
+        valid_depth = depth_roi[np.isfinite(depth_roi) & (depth_roi > 0)]
+        if valid_depth.size == 0:
+            return None
+
+        z = float(np.median(valid_depth))
+        center_x = x + w / 2
+        center_y = y + h / 2
+        focal_x = 1000.0
+        focal_y = 1000.0
+        principal_x = frame_width / 2
+        principal_y = frame_height / 2
+        object_x = (center_x - principal_x) * z / focal_x
+        object_y = (center_y - principal_y) * z / focal_y
+        return object_x, object_y, z
+
+    def draw_bb(self, frame, bounding_box_coords, inference_time, depth_map=None):
         current_objects = []
         current_track_ids = set()
         self.detected_objects = {}
@@ -103,9 +133,12 @@ class VehicleTracker:
             cv2.rectangle(frame, (x, y), (x+w, y+h), box_color, box_thickness)
             object_class = self.classMap[cls]
             label = f"{object_class} {conf:.2f}"
-            if track_id is not None:
-                label = f"{label} ID:{track_id}"
-            # cv2.putText(frame, label, (x, max(y-10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 123), 1)
+            position = self._estimate_object_position(depth_map, (x, y, w, h), frame.shape)
+            if position is not None:
+                object_x, object_y, object_z = position
+                self.logger.debug(f"{object_class} ID:{track_id} X:{object_x:.1f}m Z:{object_z:.1f}m")
+                cv2.putText(frame, f"{object_z:.1f}m", (x, y + h + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            # cv2.putText(frame, label, (x, max(y-10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 1)
 
         fps = 1.0 / inference_time if inference_time > 0 else 0
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)

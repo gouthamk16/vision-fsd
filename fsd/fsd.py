@@ -26,6 +26,18 @@ def _make_output_path(video_path, timestamp):
     return os.path.join("outputs", f"{name}_processed_{timestamp}.mp4")
 
 
+def _depth_to_bgr(depth_map):
+    import numpy as np
+    import matplotlib
+    lo, hi = depth_map.min(), depth_map.max()
+    if hi - lo < 1e-6:
+        return None
+    norm = ((depth_map - lo) / (hi - lo) * 255).astype(np.uint8)
+    cmap = matplotlib.colormaps.get_cmap("Spectral_r")
+    rgb = (cmap(norm)[:, :, :3] * 255).astype(np.uint8)
+    return rgb[:, :, ::-1]  # RGB -> BGR for OpenCV
+
+
 def driver(
     video_path,
     mode="stream",
@@ -65,8 +77,10 @@ def driver(
     total_processing_time = 0
     processor = None
     writer = None
+    depth_writer = None
     if mode == "save" and output_path is None:
         output_path = _make_output_path(video_path, timestamp)
+    depth_output_path = output_path.replace(".mp4", "_depth.mp4") if output_path else None
 
     logger.info(f"Starting video processing: {video_path} ({mode})")
     logger.info(
@@ -101,7 +115,7 @@ def driver(
             logger.info(f"Processing frame {processed_frame_count+1} (source frame {source_frame_count})")
         
         try:
-            annotated_frame = processor.process(frame)
+            annotated_frame, depth_map = processor.process(frame)
         except Exception as e:
             logger.exception(f"Error processing frame {processed_frame_count+1}: {e}")
             break
@@ -117,6 +131,8 @@ def driver(
         cv2.putText(annotated_frame, f"Avg FPS: {avg_fps:.1f}", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         cv2.putText(annotated_frame, f"Frame: {processed_frame_count}", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
+        depth_vis = _depth_to_bgr(depth_map) if depth_map is not None else None
+
         if mode == "save":
             if writer is None:
                 output_dir = os.path.dirname(output_path)
@@ -130,8 +146,16 @@ def driver(
                     break
             for _ in range(frame_stride):
                 writer.write(annotated_frame)
+            if depth_vis is not None:
+                if depth_writer is None:
+                    dh, dw = depth_vis.shape[:2]
+                    depth_writer = cv2.VideoWriter(depth_output_path, cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (dw, dh))
+                for _ in range(frame_stride):
+                    depth_writer.write(depth_vis)
         else:
             cv2.imshow("Video frame", annotated_frame)
+            if depth_vis is not None:
+                cv2.imshow("Depth map", depth_vis)
         
         if processed_frame_count % 30 == 0:
             logger.info(f"Processed {processed_frame_count} frames, Avg FPS: {avg_fps:.2f}")
@@ -168,6 +192,9 @@ def driver(
     cap.release()
     if writer is not None:
         writer.release()
+    if depth_writer is not None:
+        depth_writer.release()
+        logger.info(f"Depth video: {depth_output_path}")
     if mode == "stream":
         cv2.destroyAllWindows()
 
