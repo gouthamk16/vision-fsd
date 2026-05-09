@@ -183,7 +183,18 @@ class VehicleTracker:
             roi = frame[yo:yo + _BEV_H, xo:xo + _BEV_W]
             frame[yo:yo + _BEV_H, xo:xo + _BEV_W] = cv2.addWeighted(roi, 0.15, panel, 0.95, 0)
 
-    def draw_bb(self, frame, bounding_box_coords, inference_time, depth_map=None):
+    def _overlay_drivable(self, frame, da_mask):
+        """Blend a semi-transparent green tint onto the drivable area."""
+        drivable = da_mask == 1
+        if not drivable.any():
+            return
+        green = np.zeros_like(frame)
+        green[drivable] = (0, 200, 0)
+        frame[drivable] = cv2.addWeighted(frame, 0.55, green, 0.45, 0)[drivable]
+
+    def draw_bb(self, frame, bounding_box_coords, inference_time, depth_map=None, da_mask=None):
+        if da_mask is not None:
+            self._overlay_drivable(frame, da_mask)
         current_objects = []
         current_track_ids = set()
         self.detected_objects = {}

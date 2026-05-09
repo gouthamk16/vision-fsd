@@ -4,6 +4,7 @@ import time
 from fsd.logging_utils import get_logger
 from fsd.detect import VehicleTracker
 from fsd.depth import MonocularDepthEstimator
+from fsd.segment import DrivableAreaSegmentor
 from fsd.vision import VisualOdometry as FeatureExtractor
 
 load_dotenv()
@@ -17,6 +18,11 @@ class FrameProcessor:
         except Exception as e:
             self.depth_estimator = None
             self.logger.warning(f"Depth estimator unavailable; continuing without 3D depth labels: {e}")
+        try:
+            self.segmentor = DrivableAreaSegmentor()
+        except Exception as e:
+            self.segmentor = None
+            self.logger.warning(f"Drivable area segmentor unavailable: {e}")
         self.feature_extractor = FeatureExtractor(focal_length=(1000, 1000), principal_point=(frame_width // 2, frame_height // 2))
         self.logger.info('FrameProcessor initialized successfully.')
 
@@ -38,11 +44,17 @@ class FrameProcessor:
                 depth_map, depth_time = self.depth_estimator.estimate(frame)
                 self.logger.debug(f'Depth estimation completed in {depth_time*1000:.2f}ms.')
 
+            da_mask = None
+            if self.segmentor is not None:
+                da_mask, seg_time = self.segmentor.segment(frame)
+                self.logger.debug(f'Drivable area segmentation completed in {seg_time*1000:.2f}ms.')
+
             processed_frame = self.tracker.draw_bb(
                 frame=feature_frame,
                 bounding_box_coords=bb_coords,
                 inference_time=detection_time,
                 depth_map=depth_map,
+                da_mask=da_mask,
             )
 
         except Exception as e:
