@@ -31,7 +31,7 @@ Depth and segmentation outputs are fused in the final render: the drivable area 
 
 ![Detection and segmentation result](results/result1.png)
 
-**Depth estimation**
+**Depth estimation (Note: This is a different frame from the one above)**
 
 ![Depth estimation result](results/result-depth.png)
 
