@@ -35,6 +35,10 @@ Depth and segmentation outputs are fused in the final render: the drivable area 
 
 ![Depth estimation result](results/result-depth.png)
 
+**Another interesting result, you can see how it understands double yellow lines while segmenting drivable area and only considers the current lane**
+
+![Drivable Area NYC](results/city.png)
+
 ---
 
 ## Requirements
