@@ -4,7 +4,7 @@ import torch
 from ultralytics import YOLO
 import cv2
 import time
-from fsd.logging_utils import get_logger
+from monocular_vision.logging_utils import get_logger
 
 load_dotenv()
 

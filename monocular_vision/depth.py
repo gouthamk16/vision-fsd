@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
-from fsd.logging_utils import get_logger
+from monocular_vision.logging_utils import get_logger
 
 
 class MonocularDepthEstimator:

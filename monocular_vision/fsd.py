@@ -2,10 +2,10 @@ import os
 from dotenv import load_dotenv
 import cv2
 import time
-from fsd.logging_utils import setup_logging, get_logger
+from monocular_vision.logging_utils import setup_logging, get_logger
 
 load_dotenv()
-from fsd.process_frame import FrameProcessor
+from monocular_vision.process_frame import FrameProcessor
 
 load_dotenv()
 

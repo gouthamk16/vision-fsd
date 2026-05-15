@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from fsd.logging_utils import get_logger
+from monocular_vision.logging_utils import get_logger
 
 _WEIGHTS_URL = "https://github.com/CAIC-AD/YOLOPv2/releases/download/V0.0.1/yolopv2.pt"
 _WEIGHTS_PATH = "yolopv2.pt"

@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 import cv2
 import numpy as np
 import time
-from fsd.logging_utils import get_logger
+from monocular_vision.logging_utils import get_logger
 from collections import deque
 
 load_dotenv()

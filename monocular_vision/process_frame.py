@@ -1,11 +1,11 @@
 import os
 from dotenv import load_dotenv
 import time
-from fsd.logging_utils import get_logger
-from fsd.detect import VehicleTracker
-from fsd.depth import MonocularDepthEstimator
-from fsd.segment import DrivableAreaSegmentor
-from fsd.vision import VisualOdometry as FeatureExtractor
+from monocular_vision.logging_utils import get_logger
+from monocular_vision.detect import VehicleTracker
+from monocular_vision.depth import MonocularDepthEstimator
+from monocular_vision.segment import DrivableAreaSegmentor
+from monocular_vision.vision import VisualOdometry as FeatureExtractor
 
 load_dotenv()
 
