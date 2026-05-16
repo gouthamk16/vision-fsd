@@ -22,7 +22,8 @@ def render_contact_sheet(frame: SurroundFrame, tile_width: int = 640) -> np.ndar
         tile_size = (tile_width, int(round(height * scale)))
         tile = cv2.resize(image, tile_size, interpolation=cv2.INTER_AREA)
 
-        label = f"{channel}  t={camera.timestamp_us}"
+        frame_type = "key" if camera.is_key_frame else "sweep"
+        label = f"{channel}  {frame_type}  t={camera.timestamp_us}"
         cv2.rectangle(tile, (0, 0), (tile.shape[1], 34), (0, 0, 0), -1)
         cv2.putText(
             tile,
@@ -44,7 +45,8 @@ def render_contact_sheet(frame: SurroundFrame, tile_width: int = 640) -> np.ndar
     sheet[:] = (22, 22, 22)
 
     ego = frame.ego_pose
-    header = f"{frame.scene_name} | sample {frame.sample_index} | token {frame.sample_token}"
+    frame_type = "keyframe" if frame.is_key_frame else "sweep"
+    header = f"{frame.scene_name} | {frame_type} {frame.sample_index} | token {frame.sample_token}"
     pose = (
         f"ego xyz=({ego['translation'][0]:.2f}, {ego['translation'][1]:.2f}, "
         f"{ego['translation'][2]:.2f})"

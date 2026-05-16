@@ -428,7 +428,12 @@ Good candidates to study or integrate later:
 - [x] Add a nuScenes metadata loader using direct JSON reads from the dataset root.
 - [x] Add a `SurroundFrame` dataclass for six synchronized cameras.
 - [x] Add a sample visualizer: six-camera contact sheet + ego pose info.
-- [ ] Add calibration validation: project `LIDAR_TOP` points into camera images.
+- [x] Add calibration validation code: project `LIDAR_TOP` points into camera images.
+- [x] Run calibration validation smoke test when `D:/nuscenes` is mounted in the shell.
+- [x] Add running 360 visualization: save/stream six-camera and LiDAR-overlay scene sequences.
+- [x] Add smooth camera-sweep visualization using intermediate nuScenes camera frames.
+- [x] Add ego-frame LiDAR BEV rasterizer and video CLI.
+- [x] Render LiDAR BEV scene video when `D:/nuscenes` is mounted in the shell.
 - [ ] Add per-camera depth/segmentation inference wrappers that reuse existing modules where possible.
 - [ ] Add camera-to-ego back-projection.
 - [ ] Add single-frame 360 BEV rasterization.
@@ -454,3 +459,77 @@ outputs/nuscenes_contact_sheet_scene0_sample0.jpg
 Next target:
 
 > Project `LIDAR_TOP` points into the six camera images to validate calibration and coordinate transforms before BEV rasterization.
+
+Implementation added:
+
+```text
+fsd/lidar_projection.py
+```
+
+Run when `D:/nuscenes` is mounted:
+
+```powershell
+.\.venv\Scripts\python.exe -m fsd.lidar_projection --dataroot D:/nuscenes --scene-index 0 --sample-index 0 --tile-width 360 --output outputs/nuscenes_lidar_projection_scene0_sample0.jpg
+```
+
+Smoke-test output:
+
+```text
+outputs/nuscenes_lidar_projection_scene0_sample0.jpg
+```
+
+Projected point counts for scene 0 / sample 0:
+
+```text
+raw LiDAR points: 34720
+CAM_FRONT_LEFT: 3263
+CAM_FRONT: 3364
+CAM_FRONT_RIGHT: 2770
+CAM_BACK_LEFT: 4055
+CAM_BACK: 4318
+CAM_BACK_RIGHT: 2998
+```
+
+Running visualization commands:
+
+```powershell
+.\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scene-index 0 --frames 5 --view cameras --save --tile-width 360 --fps 2 --output outputs/nuscenes_cameras_sequence_smoke.mp4
+
+.\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scene-index 0 --frames 5 --view lidar --save --tile-width 360 --fps 2 --output outputs/nuscenes_lidar_sequence_smoke.mp4
+```
+
+Use `--stream` instead of `--save` to display the sequence in an OpenCV window and press `q` to quit.
+
+Smooth camera sweep visualization:
+
+```powershell
+.\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scene-index 0 --frames 233 --view cameras --sequence sweeps --save --tile-width 360 --fps 12 --output outputs/nuscenes_scene0_camera_sweeps_12fps.mp4
+```
+
+Output:
+
+```text
+outputs/nuscenes_scene0_camera_sweeps_12fps.mp4
+233 frames, 12 FPS, 1080x480, 19.4 seconds
+```
+
+LiDAR BEV visualization:
+
+```powershell
+.\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scene-index 0 --frames 40 --view bev --sequence keyframes --save --fps 2 --bev-resolution 0.25 --bev-scale 2 --output outputs/nuscenes_scene0_40f_bev_unified.mp4
+```
+
+Output:
+
+```text
+outputs/nuscenes_scene0_40f_bev_unified.mp4
+40 frames, 2 FPS, 800x916, 20.0 seconds
+```
+
+`fsd.visualize` is the canonical visualization entry point:
+
+```text
+--view cameras   six-camera contact sheet
+--view lidar     LiDAR projected into camera images
+--view bev       ego-frame LiDAR BEV
+```

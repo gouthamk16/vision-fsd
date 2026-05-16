@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from bisect import bisect_left
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ CAMERA_CHANNELS = (
     "CAM_BACK",
     "CAM_BACK_RIGHT",
 )
+LIDAR_TOP = "LIDAR_TOP"
 
 
 @dataclass(frozen=True)
@@ -25,10 +27,29 @@ class CameraFrame:
     sample_data_token: str
     calibrated_sensor: dict[str, Any]
     ego_pose: dict[str, Any]
+    is_key_frame: bool = True
 
     @property
     def camera_intrinsic(self) -> list[list[float]]:
         return self.calibrated_sensor["camera_intrinsic"]
+
+    @property
+    def sensor_translation(self) -> list[float]:
+        return self.calibrated_sensor["translation"]
+
+    @property
+    def sensor_rotation(self) -> list[float]:
+        return self.calibrated_sensor["rotation"]
+
+
+@dataclass(frozen=True)
+class LidarFrame:
+    channel: str
+    pointcloud_path: Path
+    timestamp_us: int
+    sample_data_token: str
+    calibrated_sensor: dict[str, Any]
+    ego_pose: dict[str, Any]
 
     @property
     def sensor_translation(self) -> list[float]:
@@ -47,6 +68,7 @@ class SurroundFrame:
     sample_index: int
     timestamp_us: int
     cameras: dict[str, CameraFrame]
+    is_key_frame: bool = True
 
     @property
     def ego_pose(self) -> dict[str, Any]:
@@ -134,6 +156,123 @@ class NuScenesSceneLoader:
             cameras=cameras,
         )
 
+    def iter_scene_frames(
+        self,
+        scene_index: int = 0,
+        start_sample_index: int = 0,
+        max_frames: int | None = None,
+        scene_name: str | None = None,
+        include_lidar: bool = False,
+    ):
+        """Yield scene frames after prefetching required metadata in one pass."""
+        scene = self._select_scene(scene_index=scene_index, scene_name=scene_name)
+        samples = self._sample_sequence(scene, start_sample_index, max_frames)
+        if not samples:
+            return
+
+        channels = set(CAMERA_CHANNELS)
+        if include_lidar:
+            channels.add(LIDAR_TOP)
+
+        sample_tokens = {sample["token"] for _, sample in samples}
+        sample_records = self._get_scene_sample_channel_data(sample_tokens, channels)
+
+        ego_pose_tokens = {
+            record["ego_pose_token"]
+            for records_by_channel in sample_records.values()
+            for record in records_by_channel.values()
+        }
+        ego_poses = self._get_ego_poses(ego_pose_tokens)
+
+        for absolute_index, sample in samples:
+            records_by_channel = sample_records[sample["token"]]
+            frame = self._make_surround_frame(
+                scene=scene,
+                sample=sample,
+                sample_index=absolute_index,
+                records_by_channel=records_by_channel,
+                ego_poses=ego_poses,
+            )
+            lidar = None
+            if include_lidar:
+                lidar_record = records_by_channel[LIDAR_TOP]
+                lidar = self._make_lidar_frame(lidar_record, ego_poses)
+            yield frame, lidar
+
+    def iter_camera_sweep_frames(
+        self,
+        scene_index: int = 0,
+        start_frame_index: int = 0,
+        max_frames: int | None = None,
+        scene_name: str | None = None,
+        target_channel: str = "CAM_FRONT",
+        tolerance_us: int = 100_000,
+    ):
+        """Yield smoother six-camera frames grouped from camera sweeps.
+
+        The target channel supplies the timeline. For each target timestamp, the
+        nearest image from every other camera is selected if it is within the
+        tolerance. This produces real intermediate camera frames instead of
+        speeding up sparse key samples.
+        """
+        if target_channel not in CAMERA_CHANNELS:
+            raise ValueError(f"target_channel must be one of {CAMERA_CHANNELS}")
+        if start_frame_index < 0:
+            raise ValueError("start_frame_index must be >= 0")
+        if max_frames is not None and max_frames < 0:
+            raise ValueError("max_frames must be >= 0")
+        if max_frames == 0:
+            return
+
+        scene = self._select_scene(scene_index=scene_index, scene_name=scene_name)
+        sample_tokens = {sample["token"] for _, sample in self._sample_sequence(scene, 0, None)}
+        records_by_channel = self._get_scene_camera_records(
+            sample_tokens=sample_tokens,
+            include_non_key=True,
+        )
+        groups = self._group_camera_records_by_target_channel(
+            records_by_channel=records_by_channel,
+            target_channel=target_channel,
+            tolerance_us=tolerance_us,
+        )
+        groups = groups[start_frame_index:]
+        if max_frames is not None:
+            groups = groups[:max_frames]
+        if not groups:
+            return
+
+        ego_pose_tokens = {
+            record["ego_pose_token"]
+            for records_by_channel in groups
+            for record in records_by_channel.values()
+        }
+        ego_poses = self._get_ego_poses(ego_pose_tokens)
+
+        for relative_index, records in enumerate(groups):
+            target_record = records[target_channel]
+            yield self._make_surround_frame(
+                scene=scene,
+                sample=self._samples[target_record["sample_token"]],
+                sample_index=start_frame_index + relative_index,
+                records_by_channel=records,
+                ego_poses=ego_poses,
+                timestamp_us=target_record["timestamp"],
+                is_key_frame=all(record.get("is_key_frame", False) for record in records.values()),
+            )
+
+    def get_lidar_frame(
+        self,
+        scene_index: int = 0,
+        sample_index: int = 0,
+        scene_name: str | None = None,
+        channel: str = LIDAR_TOP,
+    ) -> LidarFrame:
+        scene = self._select_scene(scene_index=scene_index, scene_name=scene_name)
+        sample = self._sample_at(scene, sample_index)
+        record = self._get_sample_channel_data(sample["token"], channel)
+        ego_pose = self._get_ego_poses({record["ego_pose_token"]})[record["ego_pose_token"]]
+        return self._make_lidar_frame(record, {record["ego_pose_token"]: ego_pose})
+
     def _load_table(self, name: str) -> list[dict[str, Any]]:
         with (self.meta_dir / name).open("r", encoding="utf-8") as handle:
             return json.load(handle)
@@ -164,6 +303,80 @@ class NuScenesSceneLoader:
                 )
             sample = self._samples[token]
         return sample
+
+    def _sample_sequence(
+        self,
+        scene: dict[str, Any],
+        start_sample_index: int,
+        max_frames: int | None,
+    ) -> list[tuple[int, dict[str, Any]]]:
+        if start_sample_index < 0:
+            raise ValueError("start_sample_index must be >= 0")
+        if max_frames is not None and max_frames < 0:
+            raise ValueError("max_frames must be >= 0")
+        if max_frames == 0:
+            return []
+
+        sample = self._sample_at(scene, start_sample_index)
+        samples = [(start_sample_index, sample)]
+        while sample["next"]:
+            if max_frames is not None and len(samples) >= max_frames:
+                break
+            sample = self._samples[sample["next"]]
+            samples.append((start_sample_index + len(samples), sample))
+        return samples
+
+    def _make_surround_frame(
+        self,
+        scene: dict[str, Any],
+        sample: dict[str, Any],
+        sample_index: int,
+        records_by_channel: dict[str, dict[str, Any]],
+        ego_poses: dict[str, dict[str, Any]],
+        timestamp_us: int | None = None,
+        is_key_frame: bool = True,
+    ) -> SurroundFrame:
+        cameras: dict[str, CameraFrame] = {}
+        for channel in CAMERA_CHANNELS:
+            record = records_by_channel.get(channel)
+            if record is None:
+                continue
+
+            calibrated = self._calibrated_sensors[record["calibrated_sensor_token"]]
+            cameras[channel] = CameraFrame(
+                channel=channel,
+                image_path=self.dataroot / record["filename"],
+                timestamp_us=record["timestamp"],
+                sample_data_token=record["token"],
+                calibrated_sensor=calibrated,
+                ego_pose=ego_poses[record["ego_pose_token"]],
+                is_key_frame=record.get("is_key_frame", True),
+            )
+
+        return SurroundFrame(
+            scene_token=scene["token"],
+            scene_name=scene["name"],
+            sample_token=sample["token"],
+            sample_index=sample_index,
+            timestamp_us=sample["timestamp"] if timestamp_us is None else timestamp_us,
+            cameras=cameras,
+            is_key_frame=is_key_frame,
+        )
+
+    def _make_lidar_frame(
+        self,
+        record: dict[str, Any],
+        ego_poses: dict[str, dict[str, Any]],
+    ) -> LidarFrame:
+        calibrated = self._calibrated_sensors[record["calibrated_sensor_token"]]
+        return LidarFrame(
+            channel=LIDAR_TOP,
+            pointcloud_path=self.dataroot / record["filename"],
+            timestamp_us=record["timestamp"],
+            sample_data_token=record["token"],
+            calibrated_sensor=calibrated,
+            ego_pose=ego_poses[record["ego_pose_token"]],
+        )
 
     def _get_sample_data(self, tokens: list[str]) -> dict[str, dict[str, Any]]:
         missing = set(tokens) - self._sample_data_cache.keys()
@@ -200,6 +413,139 @@ class NuScenesSceneLoader:
 
         missing = set(CAMERA_CHANNELS) - cameras.keys()
         raise KeyError(f"Missing camera sample_data for sample {sample_token}: {sorted(missing)}")
+
+    def _get_sample_channel_data(self, sample_token: str, channel: str) -> dict[str, Any]:
+        table_path = self.meta_dir / "sample_data.json"
+        for record in _iter_json_objects(table_path):
+            if record.get("sample_token") != sample_token:
+                continue
+            if not record.get("is_key_frame", False):
+                continue
+
+            calibrated = self._calibrated_sensors[record["calibrated_sensor_token"]]
+            sensor = self._sensors[calibrated["sensor_token"]]
+            if sensor["channel"] != channel:
+                continue
+
+            self._sample_data_cache[record["token"]] = record
+            return record
+
+        raise KeyError(f"Missing {channel} sample_data for sample {sample_token}")
+
+    def _get_scene_sample_channel_data(
+        self,
+        sample_tokens: set[str],
+        channels: set[str],
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        records_by_sample = {token: {} for token in sample_tokens}
+        table_path = self.meta_dir / "sample_data.json"
+        expected_records = len(sample_tokens) * len(channels)
+
+        for record in _iter_json_objects(table_path):
+            sample_token = record.get("sample_token")
+            if sample_token not in sample_tokens:
+                continue
+            if not record.get("is_key_frame", False):
+                continue
+
+            calibrated = self._calibrated_sensors[record["calibrated_sensor_token"]]
+            sensor = self._sensors[calibrated["sensor_token"]]
+            channel = sensor["channel"]
+            if channel not in channels:
+                continue
+
+            records_by_sample[sample_token][channel] = record
+            self._sample_data_cache[record["token"]] = record
+            if sum(len(records) for records in records_by_sample.values()) == expected_records:
+                break
+
+        missing = {
+            sample_token: sorted(channels - records.keys())
+            for sample_token, records in records_by_sample.items()
+            if channels - records.keys()
+        }
+        if missing:
+            preview = list(missing.items())[:3]
+            raise KeyError(f"Missing scene sample_data channels: {preview}")
+
+        return records_by_sample
+
+    def _get_scene_camera_records(
+        self,
+        sample_tokens: set[str],
+        include_non_key: bool,
+    ) -> dict[str, list[dict[str, Any]]]:
+        records_by_channel: dict[str, list[dict[str, Any]]] = {
+            channel: []
+            for channel in CAMERA_CHANNELS
+        }
+        table_path = self.meta_dir / "sample_data.json"
+
+        for record in _iter_json_objects(table_path):
+            if record.get("sample_token") not in sample_tokens:
+                continue
+            if not include_non_key and not record.get("is_key_frame", False):
+                continue
+
+            calibrated = self._calibrated_sensors[record["calibrated_sensor_token"]]
+            sensor = self._sensors[calibrated["sensor_token"]]
+            channel = sensor["channel"]
+            if channel not in records_by_channel:
+                continue
+
+            records_by_channel[channel].append(record)
+            self._sample_data_cache[record["token"]] = record
+
+        missing = [channel for channel, records in records_by_channel.items() if not records]
+        if missing:
+            raise KeyError(f"Missing camera records for channels: {missing}")
+
+        for records in records_by_channel.values():
+            records.sort(key=lambda record: record["timestamp"])
+        return records_by_channel
+
+    @staticmethod
+    def _group_camera_records_by_target_channel(
+        records_by_channel: dict[str, list[dict[str, Any]]],
+        target_channel: str,
+        tolerance_us: int,
+    ) -> list[dict[str, dict[str, Any]]]:
+        timestamps_by_channel = {
+            channel: [record["timestamp"] for record in records]
+            for channel, records in records_by_channel.items()
+        }
+        groups: list[dict[str, dict[str, Any]]] = []
+
+        for target_record in records_by_channel[target_channel]:
+            target_timestamp = target_record["timestamp"]
+            group: dict[str, dict[str, Any]] = {}
+            valid = True
+
+            for channel, records in records_by_channel.items():
+                timestamps = timestamps_by_channel[channel]
+                index = bisect_left(timestamps, target_timestamp)
+                candidates = []
+                if index < len(records):
+                    candidates.append(records[index])
+                if index > 0:
+                    candidates.append(records[index - 1])
+                if not candidates:
+                    valid = False
+                    break
+
+                nearest = min(
+                    candidates,
+                    key=lambda record: abs(record["timestamp"] - target_timestamp),
+                )
+                if abs(nearest["timestamp"] - target_timestamp) > tolerance_us:
+                    valid = False
+                    break
+                group[channel] = nearest
+
+            if valid:
+                groups.append(group)
+
+        return groups
 
     def _get_ego_poses(self, tokens: set[str]) -> dict[str, dict[str, Any]]:
         missing = tokens - self._ego_pose_cache.keys()

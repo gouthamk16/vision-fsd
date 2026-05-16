@@ -1,6 +1,6 @@
 ## Vision for FSD 
 
-Vision-based path tracking and environment mapping for autonomous vehicles. Extracting important features from monocular frames for advanced driver assistance systems. 
+Vision-based path tracking and environment mapping for autonomous vehicles. Extracting important features from monocular frames for advanced driver assistance systems. Currently also working on interpreting features from surround vision and lidar inputs.
 
 **Implemented using geometry based feature extractors and open-sourced models. Not practically useful, more of a research oriented project.**
 
@@ -12,7 +12,7 @@ A major challenge in developing such systems is the massive amounts of annotated
 
 ---
 
-## What this does
+## What the monocular vision extractor does
 
 Each video frame is passed through four subsystems running in sequence:
 
@@ -38,6 +38,58 @@ Depth and segmentation outputs are fused in the final render: the drivable area 
 **Another interesting result, you can see how it understands double yellow lines while segmenting drivable area and only considers the current lane**
 
 ![Drivable Area NYC](results/city.png)
+
+---
+
+## 360° Vision — nuScenes 
+
+Beyond single-camera dashcam footage, we also work with the [nuScenes](https://www.nuscenes.org/) dataset, which has six surround-view cameras + LiDAR on a real autonomous vehicle. This lets us look in all directions at once and work with proper 3D sensor data instead of inferring depth from a single image. Implemented in the [fsd](fsd/) folder.
+
+nuScenes is organised as ~850 independent 20-second driving clips (called scenes), each with ~40 keyframes at 2 Hz. They're not continuous - scene 5 has nothing to do with scene 6 temporally or geographically, but each scene on its own is a clean, calibrated, fully-labelled snippet of real urban driving.
+
+### What we can visualise
+
+| View | What it shows |
+|---|---|
+| `cameras` | All six cameras tiled into a contact sheet |
+| `lidar` | LiDAR point cloud projected onto each camera image, coloured by depth |
+| `bev` | Bird's-eye-view of the LiDAR sweep from above |
+| `all` | All three rendered simultaneously |
+
+### Results
+
+**Six surround cameras tiled into a contact sheet**
+
+![nuScenes cameras](results/nuscenes_cameras.jpg)
+
+**LiDAR point cloud projected onto the camera images, coloured by depth**
+
+![nuScenes lidar projection](results/nuscenes_lidar.jpg)
+
+**Bird's-eye-view of the LiDAR sweep**
+
+![nuScenes BEV](results/nuscenes_bev.jpg)
+
+### Run
+
+```bash
+# Single scene, default 20 keyframes
+python -m fsd.visualize --view cameras --save
+
+# All frames in a scene
+python -m fsd.visualize --view lidar --frames all --save
+
+# Stitch scenes 0 through 9 into one video
+python -m fsd.visualize --scenes 0-9 --frames all --view cameras --save
+
+# Stream all three views at once
+python -m fsd.visualize --view all --frames all --stream
+
+# Smoother video using raw camera sweeps (~12 Hz instead of 2 Hz keyframes)
+python -m fsd.visualize --view cameras --sequence sweeps --frames all --save
+```
+
+nuScenes data should live at `D:/nuscenes` or set `NUSCENES_ROOT` to point elsewhere.
 
 ---
 
