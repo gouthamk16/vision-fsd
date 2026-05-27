@@ -10,6 +10,8 @@ The core idea of this project is to build an end-to-end perception model that le
 
 A major challenge in developing such systems is the massive amounts of annotated driving data required. Modern autonomous driving systems rely heavily on large-scale real-world data collection pipelines. For example, Tesla continuously gathers driving data from customer vehicles in real time, enabling iterative large-scale training and refinement of its Autopilot models (they call it "Fleet-Learning"). This continuous learning approach provides access to highly diverse driving scenarios and edge cases which significantly improves model generalization.
 
+Research/Study on hardware required to run such systems [here](hardware.md)
+
 ---
 
 ## What the monocular vision extractor does
