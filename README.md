@@ -169,10 +169,11 @@ python main.py --help
 | `yolo26n.pt` | ~6 MB | Included in repo |
 | `yolopv2.pt` | ~70 MB | Auto-downloaded from GitHub releases on first run |
 | DepthAnything V2 (metric outdoor large) | ~335 MB | Auto-downloaded from HuggingFace on first run |
+| Lift-Splat-Shoot BEV vehicle seg (`model525000.pt`) | ~55 MB | Manual: [Google Drive](https://drive.google.com/file/d/1bsUYveW_eOqa4lglryyGQNeC4fyQWvQQ/view?usp=sharing), drop into `models/` and pass via `--lss-weights` |
 
 ---
 
 ## Todo
 
 - Extended Kalman filters for trajectory mapping and path tracking
-- Lane detection
+- Lane detection (probably using a pretrained model, training a lane det model today is useless)
