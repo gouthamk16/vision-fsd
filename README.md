@@ -41,7 +41,7 @@ Depth and segmentation outputs are fused in the final render: the drivable area 
 
 ---
 
-## 360° Vision — nuScenes 
+## 360 Vision - nuScenes 
 
 Beyond single-camera dashcam footage, we also work with the [nuScenes](https://www.nuscenes.org/) dataset, which has six surround-view cameras + LiDAR on a real autonomous vehicle. This lets us look in all directions at once and work with proper 3D sensor data instead of inferring depth from a single image. Implemented in the [fsd](fsd/) folder.
 
@@ -54,7 +54,13 @@ nuScenes is organised as ~850 independent 20-second driving clips (called scenes
 | `cameras` | All six cameras tiled into a contact sheet |
 | `lidar` | LiDAR point cloud projected onto each camera image, coloured by depth |
 | `bev` | Bird's-eye-view of the LiDAR sweep from above |
-| `all` | All three rendered simultaneously |
+| `lss_bev` | Camera-only BEV vehicle prediction from Lift-Splat-Shoot, drawn on top of the nuScenes HD map |
+| `lss_lidar_bev` | LSS prediction blended onto the LiDAR BEV for a direct sanity check |
+| `all` | All views rendered simultaneously |
+
+### Camera-only BEV with Lift-Splat-Shoot
+
+The six surround cameras alone are enough to estimate a top-down vehicle occupancy map. We integrate NVIDIA's [Lift-Splat-Shoot](https://github.com/nv-tlabs/lift-splat-shoot) (ECCV 2020): each camera image is lifted into a per-pixel depth distribution, splat into a shared ego-frame voxel grid, and decoded into a BEV vehicle segmentation. The pretrained checkpoint runs without finetuning, and we render the output on top of the nuScenes HD map expansion pack (includes lanes, road outlines, lane lines etc). Implementation in [fsd/lss.py](fsd/lss.py) and [fsd/nuscenes_map.py](fsd/nuscenes_map.py).
 
 ### Results
 
@@ -69,6 +75,10 @@ nuScenes is organised as ~850 independent 20-second driving clips (called scenes
 **Bird's-eye-view of the LiDAR sweep**
 
 ![nuScenes BEV](results/nuscenes_bev.jpg)
+
+**Lift-Splat-Shoot vehicle BEV prediction overlaid on the nuScenes HD map (singapore-onenorth)**
+
+![nuScenes LSS BEV](results/nuscenes_lss_bev.jpg)
 
 ### Run
 

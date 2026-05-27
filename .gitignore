@@ -10,3 +10,5 @@ out_final/
 CLAUDE.md
 *.pt
 .env
+agents.md
+external/

@@ -10,6 +10,15 @@ from fsd.bev import render_lidar_bev
 from fsd.contact_sheet import render_contact_sheet
 from fsd.data import NuScenesSceneLoader
 from fsd.lidar_projection import render_lidar_projection_sheet
+from fsd.object_detection import (
+    NuScenesAnnotationLoader,
+    PredictionLoader,
+    render_camera_box_sheet,
+    render_gt_boxes_bev,
+    render_gt_prediction_bev,
+)
+from fsd.lss import LSSInference, overlay_lss_on_lidar_bev, render_lss_bev
+from fsd.nuscenes_map import NuScenesMapRenderer
 
 
 def _default_output_path(view: str, scenes_label: str) -> Path:
@@ -17,11 +26,74 @@ def _default_output_path(view: str, scenes_label: str) -> Path:
     return Path("outputs") / f"nuscenes_{view}_{scenes_label}_{timestamp}.mp4"
 
 
-def _render_view(view, frame, lidar, tile_width, max_depth, point_radius, bev_resolution, bev_scale):
+def _render_view(
+    view,
+    frame,
+    lidar,
+    tile_width,
+    max_depth,
+    point_radius,
+    bev_resolution,
+    bev_scale,
+    annotation_loader=None,
+    prediction_loader=None,
+    min_lidar_points=1,
+    score_threshold=0.1,
+    lss_inference=None,
+    lss_threshold=0.4,
+    map_renderer=None,
+):
     if view == "lidar":
         return render_lidar_projection_sheet(frame, lidar, tile_width=tile_width, max_depth=max_depth, point_radius=point_radius)
     if view == "bev":
         return render_lidar_bev(frame, lidar, resolution=bev_resolution, scale=bev_scale)
+    if view == "gt_bev":
+        if annotation_loader is None:
+            raise RuntimeError("GT BEV view requested but no annotation loader was created")
+        boxes = annotation_loader.boxes_for_frame(frame, min_lidar_points=min_lidar_points)
+        return render_gt_boxes_bev(frame, lidar, boxes, resolution=bev_resolution, scale=bev_scale)
+    if view == "pred_bev":
+        if prediction_loader is None:
+            raise RuntimeError("Prediction BEV view requested but --predictions was not provided")
+        pred_boxes = prediction_loader.boxes_for_frame(frame, score_threshold=score_threshold)
+        return render_gt_prediction_bev(frame, lidar, gt_boxes=[], pred_boxes=pred_boxes, resolution=bev_resolution, scale=bev_scale)
+    if view == "compare_bev":
+        if annotation_loader is None:
+            raise RuntimeError("Compare BEV view requested but no annotation loader was created")
+        if prediction_loader is None:
+            raise RuntimeError("Compare BEV view requested but --predictions was not provided")
+        gt_boxes = annotation_loader.boxes_for_frame(frame, min_lidar_points=min_lidar_points)
+        pred_boxes = prediction_loader.boxes_for_frame(frame, score_threshold=score_threshold)
+        return render_gt_prediction_bev(frame, lidar, gt_boxes=gt_boxes, pred_boxes=pred_boxes, resolution=bev_resolution, scale=bev_scale)
+    if view == "lss_bev":
+        if lss_inference is None:
+            raise RuntimeError("LSS BEV view requested but --lss-weights was not provided")
+        prob = lss_inference.infer(frame)
+        map_bg = None
+        if map_renderer is not None:
+            # 200x200 LSS native, render_lss_bev upsamples 4x -> 800x800.
+            map_bg = map_renderer.render(frame, output_hw=(800, 800))
+        return render_lss_bev(frame, prob, threshold=lss_threshold, map_background=map_bg)
+    if view == "lss_lidar_bev":
+        if lss_inference is None:
+            raise RuntimeError("LSS+LiDAR BEV view requested but --lss-weights was not provided")
+        prob = lss_inference.infer(frame)
+        lidar_bev = render_lidar_bev(frame, lidar, resolution=bev_resolution, scale=bev_scale)
+        return overlay_lss_on_lidar_bev(
+            lidar_bev,
+            prob,
+            lidar_resolution=bev_resolution,
+            lidar_scale=bev_scale,
+            threshold=lss_threshold,
+        )
+    if view == "box_cameras":
+        if annotation_loader is None:
+            raise RuntimeError("Camera box view requested but no annotation loader was created")
+        gt_boxes = annotation_loader.boxes_for_frame(frame, min_lidar_points=min_lidar_points)
+        pred_boxes = []
+        if prediction_loader is not None:
+            pred_boxes = prediction_loader.boxes_for_frame(frame, score_threshold=score_threshold)
+        return render_camera_box_sheet(frame, gt_boxes=gt_boxes, pred_boxes=pred_boxes, tile_width=tile_width)
     return render_contact_sheet(frame, tile_width=tile_width)
 
 
@@ -57,10 +129,29 @@ def run_visualizer(
     point_radius: int = 1,
     bev_resolution: float = 0.25,
     bev_scale: int = 2,
+    min_lidar_points: int = 1,
+    predictions_path: str | Path | None = None,
+    score_threshold: float = 0.1,
+    lss_weights: str | Path | None = None,
+    lss_threshold: float = 0.4,
+    lss_device: str | None = None,
+    use_map: bool = True,
     wait_ms: int = 1,
 ) -> list[Path] | None:
-    if view not in {"cameras", "lidar", "bev", "all"}:
-        raise ValueError("view must be 'cameras', 'lidar', 'bev', or 'all'")
+    valid_views = {
+        "cameras",
+        "lidar",
+        "bev",
+        "gt_bev",
+        "pred_bev",
+        "compare_bev",
+        "box_cameras",
+        "lss_bev",
+        "lss_lidar_bev",
+        "all",
+    }
+    if view not in valid_views:
+        raise ValueError(f"view must be one of {sorted(valid_views)}")
     if sequence not in {"keyframes", "sweeps"}:
         raise ValueError("sequence must be 'keyframes' or 'sweeps'")
     if sequence == "sweeps" and view != "cameras":
@@ -72,8 +163,37 @@ def run_visualizer(
         scene_indices = [0]
 
     loader = NuScenesSceneLoader(dataroot=dataroot)
-    views = ["cameras", "lidar", "bev"] if view == "all" else [view]
-    include_lidar = any(v in {"lidar", "bev"} for v in views)
+    all_views = [
+        "cameras",
+        "lidar",
+        "bev",
+        "gt_bev",
+        "pred_bev",
+        "compare_bev",
+        "box_cameras",
+        "lss_bev",
+        "lss_lidar_bev",
+    ]
+    views = all_views if view == "all" else [view]
+    include_lidar = any(v in {"lidar", "bev", "gt_bev", "pred_bev", "compare_bev", "lss_lidar_bev"} for v in views)
+    needs_gt = any(v in {"gt_bev", "compare_bev", "box_cameras"} for v in views)
+    needs_predictions = any(v in {"pred_bev", "compare_bev"} for v in views)
+    needs_lss = any(v in {"lss_bev", "lss_lidar_bev"} for v in views)
+    annotation_loader = NuScenesAnnotationLoader(loader) if needs_gt else None
+    prediction_loader = PredictionLoader(predictions_path) if predictions_path else None
+    if needs_predictions and prediction_loader is None:
+        raise ValueError("--predictions is required for pred_bev and compare_bev views")
+    lss_inference = None
+    if needs_lss:
+        if not lss_weights:
+            raise ValueError("--lss-weights is required for lss_bev and lss_lidar_bev views")
+        lss_inference = LSSInference(weights_path=lss_weights, device=lss_device)
+    map_renderer = None
+    if needs_lss and use_map:
+        try:
+            map_renderer = NuScenesMapRenderer(scene_loader=loader)
+        except FileNotFoundError:
+            map_renderer = None
 
     scenes_label = f"scene{scene_indices[0]}" if len(scene_indices) == 1 else f"scenes{scene_indices[0]}-{scene_indices[-1]}"
     outputs: dict[str, Path] = {}
@@ -111,6 +231,10 @@ def run_visualizer(
                     )
                 )
             else:
+                if annotation_loader is not None:
+                    scene = loader._select_scene(scene_index=scene_idx, scene_name=name)
+                    samples = loader._sample_sequence(scene, start, max_frames)
+                    annotation_loader.prefetch_sample_annotations({sample["token"] for _, sample in samples})
                 frame_iter = loader.iter_scene_frames(
                     scene_index=scene_idx,
                     start_sample_index=start,
@@ -126,7 +250,23 @@ def run_visualizer(
                 rendered_count += 1
 
                 for v in views:
-                    image = _render_view(v, frame, lidar, tile_width, max_depth, point_radius, bev_resolution, bev_scale)
+                    image = _render_view(
+                        v,
+                        frame,
+                        lidar,
+                        tile_width,
+                        max_depth,
+                        point_radius,
+                        bev_resolution,
+                        bev_scale,
+                        annotation_loader=annotation_loader,
+                        prediction_loader=prediction_loader,
+                        min_lidar_points=min_lidar_points,
+                        score_threshold=score_threshold,
+                        lss_inference=lss_inference,
+                        lss_threshold=lss_threshold,
+                        map_renderer=map_renderer,
+                    )
                     cv2.putText(
                         image,
                         f"frame {rendered_count}",
@@ -176,7 +316,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene-name", default=None, help="Named scene to render, e.g. scene-0001. Overrides --scenes.")
     parser.add_argument("--start-sample-index", type=int, default=0, help="First key sample or sweep index (first scene only).")
     parser.add_argument("--frames", type=_frames_arg, default=20, help="Max frames per scene. Pass 'all' for every frame in each scene.")
-    parser.add_argument("--view", choices=("cameras", "lidar", "bev", "all"), default="lidar", help="Visualization view.")
+    parser.add_argument(
+        "--view",
+        choices=(
+            "cameras",
+            "lidar",
+            "bev",
+            "gt_bev",
+            "pred_bev",
+            "compare_bev",
+            "box_cameras",
+            "lss_bev",
+            "lss_lidar_bev",
+            "all",
+        ),
+        default="lidar",
+        help="Visualization view.",
+    )
     parser.add_argument(
         "--sequence",
         choices=("keyframes", "sweeps"),
@@ -193,6 +349,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--point-radius", type=int, default=1, help="Projected LiDAR point radius in pixels.")
     parser.add_argument("--bev-resolution", type=float, default=0.25, help="BEV grid meters per cell.")
     parser.add_argument("--bev-scale", type=int, default=2, help="Nearest-neighbor scale for BEV output.")
+    parser.add_argument("--min-lidar-points", type=int, default=1, help="Minimum LiDAR points required per GT box.")
+    parser.add_argument("--predictions", default=None, help="Path to PointPillars/MMDetection3D prediction JSON.")
+    parser.add_argument("--score-threshold", type=float, default=0.1, help="Minimum prediction confidence to draw.")
+    parser.add_argument("--lss-weights", default=None, help="Path to pretrained LSS BEV vehicle-seg checkpoint.")
+    parser.add_argument("--lss-threshold", type=float, default=0.4, help="LSS vehicle-seg probability threshold for overlays.")
+    parser.add_argument("--lss-device", default=None, help="Device for LSS inference, e.g. 'cuda', 'cuda:0', 'cpu'.")
+    parser.add_argument("--no-map", action="store_true", help="Disable nuScenes HD-map background for LSS views.")
     parser.add_argument("--wait-ms", type=int, default=1, help="OpenCV wait time for --stream mode.")
     return parser.parse_args()
 
@@ -217,6 +380,13 @@ def main() -> None:
         point_radius=args.point_radius,
         bev_resolution=args.bev_resolution,
         bev_scale=args.bev_scale,
+        min_lidar_points=args.min_lidar_points,
+        predictions_path=args.predictions,
+        score_threshold=args.score_threshold,
+        lss_weights=args.lss_weights,
+        lss_threshold=args.lss_threshold,
+        lss_device=args.lss_device,
+        use_map=not args.no_map,
         wait_ms=args.wait_ms,
     )
     if outputs:

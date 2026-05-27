@@ -47,6 +47,13 @@ As the car moves:
 
 Think: *"What does the world around me look like over the last 5 seconds?"*
 
+For the near-term autonomy stack, the world model should be **2D/2.5D BEV**, not a full 3D voxel map:
+- 2D occupancy answers the planning question: *can the ego vehicle occupy this x-y space safely?*
+- LiDAR already gives height (`z`), so each BEV cell can also store height summaries: max height, min height, mean height, height range, and point density.
+- 3D object detections should be preserved as 3D boxes, but planning consumes their top-down footprints: x, y, width, length, yaw, velocity.
+
+Full 3D voxel occupancy is deferred until we actually need vertical volumetric reasoning such as overpasses, multi-level roads, overhead obstacles, or semantic 3D occupancy benchmarks.
+
 #### Why This Matters
 
 This unlocks:
@@ -204,6 +211,7 @@ Recruiters and researchers are often more impressed by:
 ### Phase 1 — World Modeling
 - [ ] Temporal BEV fusion
 - [ ] Occupancy grids
+- [ ] 2.5D LiDAR height channels
 - [ ] Lane topology
 - [ ] Object velocity estimation
 
@@ -218,6 +226,7 @@ Recruiters and researchers are often more impressed by:
 - [ ] CARLA integration
 
 ### Phase 4 — Learning-Based Improvements
+- [ ] Pretrained LiDAR 3D detector integration
 - [ ] Imitation learning planner
 - [ ] Trajectory transformer
 - [ ] Occupancy prediction networks
@@ -293,21 +302,26 @@ Important outputs:
 
 ### Phase 1B — Geometry Baseline for 360 BEV
 
-Use the current project strengths first:
+**Pivot from the monocular pipeline.** nuScenes ships LiDAR + 3D annotations, which makes monocular depth and 2D YOLO back-projection strictly worse than the sensor truth:
 
-- current YOLO vehicle detection/tracking
-- current Depth Anything metric depth
-- current drivable segmentation concept
-- nuScenes camera intrinsics/extrinsics
-- nuScenes ego pose instead of our fragile SIFT odometry
+- LiDAR gives metric depth at ~cm accuracy out to ~70m; Depth Anything has ~10–20% relative error that compounds in BEV.
+- nuScenes 3D box annotations give exact object pose, size, and yaw — no need to derive 3D from 2D YOLO + noisy depth.
+- The standard upgrade path for predictions (later) is a LiDAR 3D detector (CenterPoint / PointPillars), not 2D → depth back-projection.
 
-For each camera:
+What we **do** keep from the monocular project:
 
-1. Load image directly from `D:/nuscenes`.
-2. Run detection/segmentation/depth.
-3. Back-project useful pixels or object centers into that camera's 3D frame.
-4. Transform camera points into ego frame using calibrated sensor extrinsics.
-5. Rasterize into a shared BEV grid.
+- Drivable-area segmentation (YOLOPv2), but front-camera only and aimed at lane topology rather than free-space — LiDAR + HD map answer free-space better.
+- nuScenes ego pose (replaces our SIFT odometry entirely).
+
+What the geometry baseline does each frame:
+
+1. Load `LIDAR_TOP` points from `D:/nuscenes`.
+2. Transform to ego frame using calibrated sensor extrinsics.
+3. Rasterize into a shared ego-frame BEV grid (already implemented in `fsd/bev.py`).
+4. Overlay nuScenes 3D annotation boxes as the object layer.
+5. Optionally run drivable-area on `CAM_FRONT` for a semantic layer.
+
+Monocular depth and 2D detection are deferred to a future camera-only research arm (BEVFormer / LSS direction), not Phase 1.
 
 First BEV grid:
 
@@ -317,11 +331,18 @@ resolution: 0.25m or 0.5m per cell
 channels:
   occupied_prob
   free_prob
+  point_density
+  max_height
+  min_height
+  mean_height
+  height_range
   drivable_prob
   dynamic_object_prob
   semantic_class_id
   last_observed_time
 ```
+
+This is a 2D/2.5D world model. The BEV grid is 2D in x-y, but LiDAR `z` values are summarized into height channels. That gives most of the useful vertical awareness without the memory and debugging cost of full 3D voxels.
 
 ### Phase 1C — Temporal Occupancy Fusion
 
@@ -347,19 +368,33 @@ This is classical, debuggable, and directly aligned with the roadmap.
 
 ### Phase 1D — Object Motion
 
-For moving objects, start with nuScenes 3D annotations as the reference truth, then replace with model predictions later.
+For moving objects, use nuScenes 3D annotations as the reference truth. The dataset provides `instance_token` for cross-frame identity, so tracking is free.
 
 Minimum state:
 
 ```text
-track_id
+instance_token
 class_name
 x, y, yaw
 vx, vy
 last_seen
 ```
 
-Start with finite differences over annotation boxes or detected BEV centroids. Add a Kalman filter after the first visualization works.
+Compute velocity from finite differences across consecutive samples (0.5s apart). Add a Kalman filter only if visualization shows the raw GT velocities are too jittery.
+
+Use nuScenes annotations to validate the object layer first, then integrate a **public pretrained LiDAR 3D detector** rather than training our own detector from scratch.
+
+Preferred detector path:
+
+```text
+pretrained CenterPoint / CenterPoint-style LiDAR detector
+  -> predicted 3D boxes
+  -> convert to our ego-frame Box3D format
+  -> overlay predictions vs GT in BEV
+  -> feed dynamic object layer
+```
+
+Training our own detector is deferred unless pretrained inference is blocked or we have a specific research reason to fine-tune.
 
 ### Methods Available
 
@@ -388,12 +423,13 @@ Cons:
 
 #### Learning-Based 360 BEV
 
-Use after the baseline exists.
+Use after the baseline exists. For 3D object detection, prefer **pretrained nuScenes weights first** rather than training from scratch.
 
 - Lift-Splat-Shoot style view transformation
 - BEVDet / BEVDepth / BEVStereo family for camera-only 3D detection
 - BEVFormer for temporal camera-only BEV features
 - BEVFusion for camera+LiDAR or camera-only BEV baselines
+- CenterPoint / PointPillars for LiDAR-only 3D object detection
 - MapTR / MapTRv2 for vectorized lane and road-element maps
 - SurroundOcc / Occ3D / SparseOcc for semantic occupancy prediction
 
@@ -413,6 +449,8 @@ Good candidates to study or integrate later:
 
 | Model | Main Output | Why It Matters | Use Now? |
 |---|---|---|---|
+| CenterPoint | LiDAR 3D boxes, velocity, tracking-friendly object centers | best immediate fit for our LiDAR BEV + nuScenes annotations | integrate pretrained first |
+| PointPillars | LiDAR pillar/BEV 3D detection | simpler classic LiDAR baseline, but weaker/older than CenterPoint | reference/fallback |
 | BEVFormer | camera-only temporal BEV, 3D detection, map segmentation | directly matches multi-camera + temporal fusion | benchmark/reference |
 | BEVDepth / BEVStereo | camera-only BEV 3D detection with explicit depth | conceptually close to our current depth pipeline | later |
 | BEVFusion | unified BEV for camera/LiDAR detection and map segmentation | strong baseline, but repo environment is older/heavier | later/reference |
@@ -434,12 +472,20 @@ Good candidates to study or integrate later:
 - [x] Add smooth camera-sweep visualization using intermediate nuScenes camera frames.
 - [x] Add ego-frame LiDAR BEV rasterizer and video CLI.
 - [x] Render LiDAR BEV scene video when `D:/nuscenes` is mounted in the shell.
-- [ ] Add per-camera depth/segmentation inference wrappers that reuse existing modules where possible.
-- [ ] Add camera-to-ego back-projection.
-- [ ] Add single-frame 360 BEV rasterization.
+- [x] Add per-camera depth/segmentation inference wrappers that reuse existing modules where possible.
+      Pivoted: kept front-camera drivable-area only (`fsd/inference.py::DrivableAreaPipeline`). Dropped monocular depth and 2D YOLO from the surround pipeline — see Phase 1B rationale.
+- [x] Overlay nuScenes 3D annotation boxes on the LiDAR BEV (object layer).
+- [ ] Formalize LiDAR BEV tensor channels: density, max/min/mean height, height range.
+- [ ] Install/setup external MMDetection3D or OpenPCDet PointPillars runtime with nuScenes pretrained weights.
+      Status: repo-side bridge is implemented in `fsd/pointpillars.py infer`, but this Windows Python 3.12 + Torch 2.7 + CUDA 12.8 environment does not currently have compatible compiled OpenMMLab `mmcv/mmdet/mmdet3d` ops installed.
+- [x] Add PointPillars inference export command that reads `LIDAR_TOP` directly from `D:/nuscenes` and writes visualizer-ready ego-frame prediction JSON.
+- [x] Add prediction JSON adapter for PointPillars/MMDetection3D outputs.
+- [x] Visualize predicted 3D boxes vs GT boxes in BEV.
+- [x] Project GT/predicted 3D boxes back onto the six camera images.
 - [ ] Add temporal grid warping using nuScenes ego poses.
-- [ ] Add log-odds occupancy fusion and decay.
-- [ ] Add BEV video export for a short scene.
+- [ ] Add log-odds occupancy fusion and decay over the LiDAR BEV.
+- [ ] Add BEV video export for a short scene with the fused occupancy.
+- [ ] Add ego-frame object velocity from annotation finite differences.
 - [ ] Add evaluation hooks against nuScenes annotations/Occ3D labels later.
 
 ### First Implementation Target — Completed
@@ -532,4 +578,62 @@ outputs/nuscenes_scene0_40f_bev_unified.mp4
 --view cameras   six-camera contact sheet
 --view lidar     LiDAR projected into camera images
 --view bev       ego-frame LiDAR BEV
+--view gt_bev    ego-frame LiDAR BEV with nuScenes GT 3D boxes
 ```
+
+3D object detection label validation:
+
+```powershell
+.\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scenes 0 --frames 40 --view gt_bev --sequence keyframes --save --fps 2 --bev-resolution 0.25 --bev-scale 2 --output outputs/nuscenes_gt_boxes_bev_unified_40f.mp4
+```
+
+Output:
+
+```text
+outputs/nuscenes_gt_boxes_bev_unified_40f.mp4
+40 frames, 2 FPS, 800x916, 20.0 seconds
+```
+
+### Phase 1E — Camera-only LSS BEV Vehicle Segmentation
+
+Integrated NVIDIA's Lift-Splat-Shoot (ECCV 2020) BEV vehicle-segmentation model as a learned camera-only counterpart to the LiDAR BEV. This is the first learning-based BEV head in the project.
+
+- Model + helpers ported into [fsd/lss.py](fsd/lss.py) (1:1 port of `LiftSplatShoot`, `CamEncode`, `BevEncode`, `Up`, `QuickCumsum`, and grid-config helpers from the original repo). The original repo is cloned to `external/lift-splat-shoot/` for reference and is git-ignored.
+- Inference wrapper `LSSInference` consumes our `SurroundFrame` directly — no `nuscenes-devkit` runtime dependency. It builds the six per-camera intrinsics, extrinsics (calibrated_sensor rotation/translation), and the eval-time image transform (resize + center crop to 128x352) used in `src/data.py`.
+- New `fsd.visualize` views: `lss_bev` (LSS vehicle-seg BEV, 200x200 @ 0.5 m/cell, same orientation as our LiDAR BEV — ego at center, forward = top) and `lss_lidar_bev` (LSS mask overlaid on the LiDAR BEV).
+- Single dependency added: `efficientnet_pytorch==0.7.0`. EfficientNet ImageNet weights are not downloaded — `from_name` is used and the LSS checkpoint overwrites them.
+
+Pretrained weights link (NVIDIA, ECCV 2020 release):
+https://drive.google.com/file/d/1bsUYveW_eOqa4lglryyGQNeC4fyQWvQQ/view?usp=sharing
+
+Place the checkpoint anywhere and pass it via `--lss-weights`. Suggested path: `models/lss_model_525000.pt` (the `models/` folder is git-ignored).
+
+Run:
+
+```powershell
+.\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scenes 0 --frames 40 --view lss_bev --sequence keyframes --save --fps 2 --bev-scale 2 --lss-weights models/lss_model_525000.pt --output outputs/nuscenes_scene0_40f_lss_bev.mp4
+
+.\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scenes 0 --frames 40 --view lss_lidar_bev --sequence keyframes --save --fps 2 --bev-scale 2 --lss-weights models/lss_model_525000.pt --output outputs/nuscenes_scene0_40f_lss_lidar_bev.mp4
+```
+
+Open items:
+
+- [x] Smoke-test `lss_bev` and `lss_lidar_bev` end-to-end once the LSS checkpoint is on disk. Verify the BEV orientation matches the LiDAR BEV (forward = top, left = left).
+- [ ] Consider adding a four-up panel view (six cameras + LSS BEV + LiDAR BEV + GT boxes) to mirror the LSS paper teaser figure.
+
+Findings + fixes after first render pass:
+
+- The standalone `lss_bev` view now renders the LSS probability map in a `cmap='Blues'`-style "paper" look (white background, deep-blue at high probability) with the metric grid and ego marker, upsampled 4x from the native 200x200 to ~800x800 for a smooth read. A `style="dark"` mode is also available for parity with the LiDAR BEV's dark canvas.
+- The original `lss_lidar_bev` overlay was shifted by ~2x because the LSS grid (200x200 @ 0.5 m/cell) was pasted onto the LiDAR BEV (400x400 @ 0.25 m/cell, then scale=2 -> 800x800) without resampling to the correct pixel size, and the header height was not scaled along with the LiDAR canvas. Fixed by passing `lidar_resolution` and `lidar_scale` into `overlay_lss_on_lidar_bev` and resizing the LSS grid to the actual LiDAR-canvas pixel dims.
+
+About the original LSS paper's map background:
+
+- The map polygons behind LSS predictions in the NVIDIA repo come from the nuScenes **map_expansion** vector-map archive (loaded via `NuScenesMap` in `nuscenes-devkit`), not from any per-frame model output.
+- The expansion archive has now been extracted to `D:/nuscenes/maps/expansion/` (boston-seaport.json plus three Singapore JSONs). nuScenes data itself is mixed: 467 Boston scenes + 383 Singapore scenes across 3 districts. Scene -> location is looked up per-scene from `log.json`.
+- We parse the expansion JSON directly (kept the no-`nuscenes-devkit` runtime rule) in [fsd/nuscenes_map.py](fsd/nuscenes_map.py). Layers + colors mirror the original LSS visualization (`road_segment` + `lane` fill, `road_divider` + `lane_divider` lines, plus a light `ped_crossing` overlay). `NuScenesMapRenderer.render()` returns a 2D ego-frame canvas at any requested pixel size.
+- `render_lss_bev` accepts an optional `map_background`. `fsd.visualize` auto-enables the map background for LSS views when the expansion folder is present; disable with `--no-map`.
+
+About the "Shoot" head of LSS:
+
+- "Shoot" in the LSS paper refers to **template trajectory shooting**: candidate ego trajectories are scored against a predicted BEV cost map, and the lowest-cost one is chosen for planning (Section 4.4 of the ECCV 2020 paper).
+- The released open-source repo only ships the **lift + splat vehicle-segmentation head**. The cost-map head, the trajectory templates, and the shooting code are **not** in the upstream repo and therefore not in our port. Adding "shoot" would require training (or hand-defining) a cost head and authoring the trajectory-shooting code from the paper description.
