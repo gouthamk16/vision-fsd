@@ -19,6 +19,8 @@ from fsd.object_detection import (
 )
 from fsd.lss import LSSInference, overlay_lss_on_lidar_bev, render_lss_bev
 from fsd.nuscenes_map import NuScenesMapRenderer
+from fsd.occupancy import TemporalOccupancyMapper, render_occupancy_bev
+from fsd.bev_tensor import bev_tensor_from_lidar, render_bev_channels
 
 
 def _default_output_path(view: str, scenes_label: str) -> Path:
@@ -42,7 +44,16 @@ def _render_view(
     lss_inference=None,
     lss_threshold=0.4,
     map_renderer=None,
+    occupancy_mapper=None,
 ):
+    if view == "occupancy_bev":
+        if occupancy_mapper is None:
+            raise RuntimeError("Occupancy view requested but no occupancy mapper was created")
+        prob = occupancy_mapper.step(lidar)
+        return render_occupancy_bev(frame, prob, resolution=bev_resolution, scale=bev_scale)
+    if view == "height_bev":
+        tensor = bev_tensor_from_lidar(lidar, resolution=bev_resolution)
+        return render_bev_channels(frame, tensor)
     if view == "lidar":
         return render_lidar_projection_sheet(frame, lidar, tile_width=tile_width, max_depth=max_depth, point_radius=point_radius)
     if view == "bev":
@@ -148,6 +159,8 @@ def run_visualizer(
         "box_cameras",
         "lss_bev",
         "lss_lidar_bev",
+        "occupancy_bev",
+        "height_bev",
         "all",
     }
     if view not in valid_views:
@@ -173,12 +186,18 @@ def run_visualizer(
         "box_cameras",
         "lss_bev",
         "lss_lidar_bev",
+        "occupancy_bev",
+        "height_bev",
     ]
     views = all_views if view == "all" else [view]
-    include_lidar = any(v in {"lidar", "bev", "gt_bev", "pred_bev", "compare_bev", "lss_lidar_bev"} for v in views)
+    include_lidar = any(
+        v in {"lidar", "bev", "gt_bev", "pred_bev", "compare_bev", "lss_lidar_bev", "occupancy_bev", "height_bev"}
+        for v in views
+    )
     needs_gt = any(v in {"gt_bev", "compare_bev", "box_cameras"} for v in views)
     needs_predictions = any(v in {"pred_bev", "compare_bev"} for v in views)
     needs_lss = any(v in {"lss_bev", "lss_lidar_bev"} for v in views)
+    needs_occupancy = "occupancy_bev" in views
     annotation_loader = NuScenesAnnotationLoader(loader) if needs_gt else None
     prediction_loader = PredictionLoader(predictions_path) if predictions_path else None
     if needs_predictions and prediction_loader is None:
@@ -219,6 +238,9 @@ def run_visualizer(
 
             name = scene_name if len(scene_indices) == 1 else None
             start = start_sample_index if scene_i == 0 else 0
+
+            # Occupancy is stateful — fresh rolling grid per scene.
+            occupancy_mapper = TemporalOccupancyMapper(resolution=bev_resolution) if needs_occupancy else None
 
             if sequence == "sweeps":
                 frame_iter = (
@@ -266,6 +288,7 @@ def run_visualizer(
                         lss_inference=lss_inference,
                         lss_threshold=lss_threshold,
                         map_renderer=map_renderer,
+                        occupancy_mapper=occupancy_mapper,
                     )
                     cv2.putText(
                         image,
@@ -328,6 +351,8 @@ def parse_args() -> argparse.Namespace:
             "box_cameras",
             "lss_bev",
             "lss_lidar_bev",
+            "occupancy_bev",
+            "height_bev",
             "all",
         ),
         default="lidar",

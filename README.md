@@ -58,11 +58,16 @@ nuScenes is organised as ~850 independent 20-second driving clips (called scenes
 | `bev` | Bird's-eye-view of the LiDAR sweep from above |
 | `lss_bev` | Camera-only BEV vehicle prediction from Lift-Splat-Shoot, drawn on top of the nuScenes HD map |
 | `lss_lidar_bev` | LSS prediction blended onto the LiDAR BEV for a direct sanity check |
+| `occupancy_bev` | Temporal log-odds occupancy map fused across keyframes into a rolling world model |
 | `all` | All views rendered simultaneously |
 
 ### Camera-only BEV with Lift-Splat-Shoot
 
 The six surround cameras alone are enough to estimate a top-down vehicle occupancy map. We integrate NVIDIA's [Lift-Splat-Shoot](https://github.com/nv-tlabs/lift-splat-shoot) (ECCV 2020): each camera image is lifted into a per-pixel depth distribution, splat into a shared ego-frame voxel grid, and decoded into a BEV vehicle segmentation. The pretrained checkpoint runs without finetuning, and we render the output on top of the nuScenes HD map expansion pack (includes lanes, road outlines, lane lines etc). Implementation in [fsd/lss.py](fsd/lss.py) and [fsd/nuscenes_map.py](fsd/nuscenes_map.py).
+
+### Temporal occupancy - from per-frame perception to a world model
+
+Everything above is per-frame: process a sweep, draw it, move on. The occupancy view makes the system stateful. We keep a rolling log-odds grid in the ego frame, and each keyframe we warp the previous grid into the new ego frame using the nuScenes ego poses, decay it slightly, then fold in fresh LiDAR evidence - ground-height returns mark cells free, taller returns mark them occupied. The result is a continuously evolving map of free space and obstacles instead of a single-frame snapshot - the drivable corridor trailing behind the ego is evidence accumulated over the whole scene. This is the classical, debuggable groundwork for downstream trajectory planning. Implementation in [fsd/occupancy.py](fsd/occupancy.py).
 
 ### Results
 
@@ -81,6 +86,10 @@ The six surround cameras alone are enough to estimate a top-down vehicle occupan
 **Lift-Splat-Shoot vehicle BEV prediction overlaid on the nuScenes HD map (singapore-onenorth)**
 
 ![nuScenes LSS BEV](results/nuscenes_lss_bev.jpg)
+
+**Temporal occupancy - log-odds map fused across a full scene (amber = occupied, navy = free, gray = unknown)**
+
+![nuScenes occupancy](results/nuscenes_occupancy.jpg)
 
 ### Run
 
