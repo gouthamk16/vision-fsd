@@ -29,17 +29,25 @@ Depth and segmentation outputs are fused in the final render: the drivable area 
 
 ## Results
 
-**Detection + drivable area segmentation + BEV minimap**
-
-![Detection and segmentation result](results/result1.png)
-
-**Depth estimation (Note: This is a different frame from the one above)**
-
-![Depth estimation result](results/result-depth.png)
-
-**Another interesting result, you can see how it understands double yellow lines while segmenting drivable area and only considers the current lane**
-
-![Drivable Area NYC](results/city.png)
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="results/result1.png" width="100%"><br>
+      <sub>Detection + drivable-area segmentation + BEV minimap</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="results/result-depth.png" width="100%"><br>
+      <sub>Monocular depth estimation (a different frame)</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="results/city.png" width="100%"><br>
+      <sub>Understands double yellow lines - only the current lane is marked drivable</sub>
+    </td>
+    <td width="50%"></td>
+  </tr>
+</table>
 
 ---
 
@@ -59,6 +67,7 @@ nuScenes is organised as ~850 independent 20-second driving clips (called scenes
 | `lss_bev` | Camera-only BEV vehicle prediction from Lift-Splat-Shoot, drawn on top of the nuScenes HD map |
 | `lss_lidar_bev` | LSS prediction blended onto the LiDAR BEV for a direct sanity check |
 | `occupancy_bev` | Temporal log-odds occupancy map fused across keyframes into a rolling world model |
+| `height_bev` | 2.5D BEV tensor - per-cell point density and min/max/mean/range height channels |
 | `all` | All views rendered simultaneously |
 
 ### Camera-only BEV with Lift-Splat-Shoot
@@ -69,27 +78,47 @@ The six surround cameras alone are enough to estimate a top-down vehicle occupan
 
 Everything above is per-frame: process a sweep, draw it, move on. The occupancy view makes the system stateful. We keep a rolling log-odds grid in the ego frame, and each keyframe we warp the previous grid into the new ego frame using the nuScenes ego poses, decay it slightly, then fold in fresh LiDAR evidence - ground-height returns mark cells free, taller returns mark them occupied. The result is a continuously evolving map of free space and obstacles instead of a single-frame snapshot - the drivable corridor trailing behind the ego is evidence accumulated over the whole scene. This is the classical, debuggable groundwork for downstream trajectory planning. Implementation in [fsd/occupancy.py](fsd/occupancy.py).
 
+### 2.5D height channels - a richer BEV tensor
+
+The plain BEV only knows "cell has points or not." The height tensor keeps the vertical information instead of throwing it away: for every cell we record point density and the min, max, mean, and range of the LiDAR heights that landed there. `height_range` (max - min) is the useful one - flat road is near zero, cars and walls are large - so it separates drivable surface from obstacles with pure geometry, no labels. This is the data structure downstream modules (planning, lane fitting, the object layer) read instead of re-rasterizing raw points. Implementation in [fsd/bev_tensor.py](fsd/bev_tensor.py).
+
 ### Results
 
-**Six surround cameras tiled into a contact sheet**
-
-![nuScenes cameras](results/nuscenes_cameras.jpg)
-
-**LiDAR point cloud projected onto the camera images, coloured by depth**
-
-![nuScenes lidar projection](results/nuscenes_lidar.jpg)
-
-**Bird's-eye-view of the LiDAR sweep**
-
-![nuScenes BEV](results/nuscenes_bev.jpg)
-
-**Lift-Splat-Shoot vehicle BEV prediction overlaid on the nuScenes HD map (singapore-onenorth)**
-
-![nuScenes LSS BEV](results/nuscenes_lss_bev.jpg)
-
-**Temporal occupancy - log-odds map fused across a full scene (amber = occupied, navy = free, gray = unknown)**
-
-![nuScenes occupancy](results/nuscenes_occupancy.jpg)
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="results/nuscenes_cameras.jpg" width="100%"><br>
+      <sub>Six surround cameras tiled into a contact sheet</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="results/nuscenes_lidar.jpg" width="100%"><br>
+      <sub>LiDAR projected onto the camera images, coloured by depth</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="results/nuscenes_bev.jpg" width="100%"><br>
+      <sub>Bird's-eye-view of a single LiDAR sweep</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="results/nuscenes_lss_bev.jpg" width="100%"><br>
+      <sub>Lift-Splat-Shoot camera-only vehicle BEV on the HD map (singapore-onenorth)</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="results/nuscenes_occupancy.jpg" width="100%"><br>
+      <sub>Temporal occupancy - log-odds fused across a scene (amber=occupied, navy=free, gray=unknown)</sub>
+    </td>
+    <td width="50%"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <img src="results/nuscenes_height_bev.jpg" width="100%"><br>
+      <sub>2.5D BEV tensor - per-cell point density and min/max/mean/range height channels (one panel each)</sub>
+    </td>
+  </tr>
+</table>
 
 ### Run
 
