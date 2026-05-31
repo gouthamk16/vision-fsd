@@ -21,6 +21,7 @@ from fsd.lss import LSSInference, overlay_lss_on_lidar_bev, render_lss_bev
 from fsd.nuscenes_map import NuScenesMapRenderer
 from fsd.occupancy import TemporalOccupancyMapper, render_occupancy_bev
 from fsd.bev_tensor import bev_tensor_from_lidar, render_bev_channels
+from fsd.fusion_detect import FrustumFusionDetector, render_fusion_bev, render_fusion_cameras
 
 
 def _default_output_path(view: str, scenes_label: str) -> Path:
@@ -45,7 +46,15 @@ def _render_view(
     lss_threshold=0.4,
     map_renderer=None,
     occupancy_mapper=None,
+    detector=None,
 ):
+    if view in {"objects_bev", "objects_cameras"}:
+        if detector is None:
+            raise RuntimeError("Object detection view requested but no detector was created")
+        boxes = detector.detect(frame, lidar)
+        if view == "objects_bev":
+            return render_fusion_bev(frame, lidar, boxes, resolution=bev_resolution, scale=bev_scale)
+        return render_fusion_cameras(frame, boxes, tile_width=tile_width)
     if view == "occupancy_bev":
         if occupancy_mapper is None:
             raise RuntimeError("Occupancy view requested but no occupancy mapper was created")
@@ -105,6 +114,11 @@ def _render_view(
         if prediction_loader is not None:
             pred_boxes = prediction_loader.boxes_for_frame(frame, score_threshold=score_threshold)
         return render_camera_box_sheet(frame, gt_boxes=gt_boxes, pred_boxes=pred_boxes, tile_width=tile_width)
+    if view == "pred_cameras":
+        if prediction_loader is None:
+            raise RuntimeError("pred_cameras requested but --predictions was not provided")
+        pred_boxes = prediction_loader.boxes_for_frame(frame, score_threshold=score_threshold)
+        return render_camera_box_sheet(frame, gt_boxes=[], pred_boxes=pred_boxes, tile_width=tile_width)
     return render_contact_sheet(frame, tile_width=tile_width)
 
 
@@ -147,6 +161,8 @@ def run_visualizer(
     lss_threshold: float = 0.4,
     lss_device: str | None = None,
     use_map: bool = True,
+    yolo_weights: str | Path = "yolo26n.pt",
+    detector_device: str | None = None,
     wait_ms: int = 1,
 ) -> list[Path] | None:
     valid_views = {
@@ -157,10 +173,13 @@ def run_visualizer(
         "pred_bev",
         "compare_bev",
         "box_cameras",
+        "pred_cameras",
         "lss_bev",
         "lss_lidar_bev",
         "occupancy_bev",
         "height_bev",
+        "objects_bev",
+        "objects_cameras",
         "all",
     }
     if view not in valid_views:
@@ -184,20 +203,27 @@ def run_visualizer(
         "pred_bev",
         "compare_bev",
         "box_cameras",
+        "pred_cameras",
         "lss_bev",
         "lss_lidar_bev",
         "occupancy_bev",
         "height_bev",
+        "objects_bev",
+        "objects_cameras",
     ]
     views = all_views if view == "all" else [view]
     include_lidar = any(
-        v in {"lidar", "bev", "gt_bev", "pred_bev", "compare_bev", "lss_lidar_bev", "occupancy_bev", "height_bev"}
+        v in {
+            "lidar", "bev", "gt_bev", "pred_bev", "compare_bev", "lss_lidar_bev",
+            "occupancy_bev", "height_bev", "objects_bev", "objects_cameras",
+        }
         for v in views
     )
     needs_gt = any(v in {"gt_bev", "compare_bev", "box_cameras"} for v in views)
-    needs_predictions = any(v in {"pred_bev", "compare_bev"} for v in views)
+    needs_predictions = any(v in {"pred_bev", "compare_bev", "pred_cameras"} for v in views)
     needs_lss = any(v in {"lss_bev", "lss_lidar_bev"} for v in views)
     needs_occupancy = "occupancy_bev" in views
+    needs_detector = any(v in {"objects_bev", "objects_cameras"} for v in views)
     annotation_loader = NuScenesAnnotationLoader(loader) if needs_gt else None
     prediction_loader = PredictionLoader(predictions_path) if predictions_path else None
     if needs_predictions and prediction_loader is None:
@@ -213,6 +239,7 @@ def run_visualizer(
             map_renderer = NuScenesMapRenderer(scene_loader=loader)
         except FileNotFoundError:
             map_renderer = None
+    detector = FrustumFusionDetector(weights_path=yolo_weights, device=detector_device) if needs_detector else None
 
     scenes_label = f"scene{scene_indices[0]}" if len(scene_indices) == 1 else f"scenes{scene_indices[0]}-{scene_indices[-1]}"
     outputs: dict[str, Path] = {}
@@ -289,6 +316,7 @@ def run_visualizer(
                         lss_threshold=lss_threshold,
                         map_renderer=map_renderer,
                         occupancy_mapper=occupancy_mapper,
+                        detector=detector,
                     )
                     cv2.putText(
                         image,
@@ -349,10 +377,13 @@ def parse_args() -> argparse.Namespace:
             "pred_bev",
             "compare_bev",
             "box_cameras",
+            "pred_cameras",
             "lss_bev",
             "lss_lidar_bev",
             "occupancy_bev",
             "height_bev",
+            "objects_bev",
+            "objects_cameras",
             "all",
         ),
         default="lidar",
@@ -381,6 +412,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lss-threshold", type=float, default=0.4, help="LSS vehicle-seg probability threshold for overlays.")
     parser.add_argument("--lss-device", default=None, help="Device for LSS inference, e.g. 'cuda', 'cuda:0', 'cpu'.")
     parser.add_argument("--no-map", action="store_true", help="Disable nuScenes HD-map background for LSS views.")
+    parser.add_argument("--yolo-weights", default="yolo26n.pt", help="YOLO weights for the fusion object detector.")
+    parser.add_argument("--detector-device", default=None, help="Device for the object detector, e.g. 'cuda', 'cpu'.")
     parser.add_argument("--wait-ms", type=int, default=1, help="OpenCV wait time for --stream mode.")
     return parser.parse_args()
 
@@ -412,6 +445,8 @@ def main() -> None:
         lss_threshold=args.lss_threshold,
         lss_device=args.lss_device,
         use_map=not args.no_map,
+        yolo_weights=args.yolo_weights,
+        detector_device=args.detector_device,
         wait_ms=args.wait_ms,
     )
     if outputs:

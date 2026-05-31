@@ -12,3 +12,6 @@ CLAUDE.md
 .env
 agents.md
 external/
+.venv-mmdet3d/
+checkpoints/
+*.pth

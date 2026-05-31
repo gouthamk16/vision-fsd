@@ -258,6 +258,8 @@ The drive is sometimes unmounted in the shell; renders that hit `D:/nuscenes` on
 | Camera-only LSS BEV vehicle seg + HD-map background | `fsd/lss.py`, `fsd/nuscenes_map.py` | `lss_bev`, `lss_lidar_bev` |
 | Temporal log-odds occupancy fusion | `fsd/occupancy.py` | `occupancy_bev` |
 | 2.5D BEV tensor: per-cell density + min/max/mean height + range | `fsd/bev_tensor.py` | `height_bev` |
+| Camera object detection, LiDAR-ranged (frustum fusion) | `fsd/fusion_detect.py` | `objects_bev`, `objects_cameras` |
+| CenterPoint LiDAR 3D detection (mmdet3d, isolated env) | `fsd/centerpoint_export.py` (+ `.venv-mmdet3d`) | `pred_bev`, `compare_bev` |
 
 Notes:
 - `--sequence sweeps` gives ~12 Hz smooth camera video (intermediate frames between keyframes); everything else uses 2 Hz keyframes.
@@ -310,16 +312,76 @@ Hardens the BEV from "occupied/free" into a multi-channel world-model tensor. Ev
 .\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scenes 0 --frames 40 --view height_bev --save --bev-resolution 0.25 --output outputs/nuscenes_scene0_height_bev.mp4
 ```
 
-### PointPillars LiDAR detector — parked
+### Frustum-fusion object detection (`fsd/fusion_detect.py`) — dynamic layer, done
 
-A repo-side bridge exists (`fsd/pointpillars.py`) plus a prediction-JSON adapter and the `pred_bev`/`compare_bev` views that consume it. Actually running inference is **blocked**: this Windows + Python 3.12 + Torch 2.7 + CUDA 12.8 environment has no compatible compiled OpenMMLab `mmcv/mmdet/mmdet3d` ops. Revisit only if we need predicted (not GT) 3D boxes; CenterPoint via a working runtime is the preferred path.
+The dynamic-object layer, built **hybrid** by deliberate choice: cameras detect, LiDAR ranges. Decision context is in the chat log — we keep LiDAR for geometry (occupancy/height) but do *object detection from vision*, since cameras are the scalable, semantics-capable sensor and the learned LiDAR/BEV detectors (PointPillars, BEVDet) are blocked on this env anyway.
+
+Pipeline per keyframe:
+1. YOLO (`yolo26n.pt`, already in repo) runs on each of the six camera images → 2D boxes + class. This is the detection decision — camera-only.
+2. The 2D box defines a viewing **frustum**. Project the LiDAR sweep into that camera; the points landing inside the box are the object's returns. Drop ground (`z > 0.3`), keep the nearest range cluster (rejects background seen through/around the box), and that gives the object's metric position — no depth guessing.
+3. Build an ego-frame `Box3D`: position from the cluster, footprint from a class size prior, heading from the cluster's dominant horizontal axis (PCA), rested on the ground plane (`z = height/2`). These are the "2D corner coords for BEV" — `Box3D.corners_ego`.
+4. Dedup objects seen by two overlapping cameras (greedy, by class + center distance).
+
+Views: `objects_bev` (ranged boxes on the LiDAR BEV) and `objects_cameras` (boxes reprojected onto the six images). CLI: `--yolo-weights`, `--detector-device`.
+
+```powershell
+.\.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scenes 0 --frames 40 --view objects_bev --save --bev-scale 2 --output outputs/nuscenes_scene0_objects_bev.mp4
+```
+
+Honest limits: positions are as good as the LiDAR cluster (solid), but class is YOLO/COCO (car/truck/bus/bike/motorcycle/pedestrian only), size is a prior not measured, and heading from a partial-view cluster is rough. Good enough to feed tracking → velocity next. Validated synthetically (ground/background rejection, ground-resting, dedup); full-scene render pending the data drive being mounted.
+
+### CenterPoint LiDAR 3D detector via mmdet3d — working (isolated env)
+
+A real, pretrained 3D detector (not the 2D-YOLO frustum hack). The OpenMMLab stack would not build on the main `.venv` (Py3.12 + Torch 2.7 + CUDA 12.8 — no prebuilt `mmcv`), so it lives in a **separate, pinned env** and feeds boxes to the visualizer through the existing prediction-JSON adapter (`pred_bev` / `compare_bev`). **Working end-to-end on real nuScenes**: scene 0 / 40 frames → 1454 boxes (~36/frame); in `compare_bev` the red predictions sit on top of the green GT boxes with correct headings. Outputs: `outputs/nuscenes_scene0_centerpoint_bev.mp4`, `outputs/nuscenes_scene0_centerpoint_vs_gt.mp4`.
+
+Working install recipe (reproducible — the key was avoiding any from-source `mmcv` build):
+
+```powershell
+# 1. isolated Python 3.11 env (main .venv is Py3.12 — incompatible with prebuilt mmcv)
+#    got 3.11 via `uv` (uv python install 3.11), then:
+<py3.11>\python.exe -m venv .venv-mmdet3d
+# 2. Torch 2.1 + cu121 — the combo with prebuilt mmcv wheels (cu121 binaries run on the 12.8 driver)
+.venv-mmdet3d\Scripts\python.exe -m pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121
+# 3. OpenMMLab via mim (pulls the prebuilt mmcv 2.1.0 wheel — no compile)
+.venv-mmdet3d\Scripts\python.exe -m pip install -U openmim numpy==1.26.4
+.venv-mmdet3d\Scripts\mim.exe install mmengine "mmcv==2.1.0" "mmdet==3.2.0"
+# 4. mmdet3d WITHOUT deps (its lyft-dataset-sdk dep drags an ancient source-built matplotlib)
+.venv-mmdet3d\Scripts\python.exe -m pip install --no-deps "mmdet3d==1.4.0"
+.venv-mmdet3d\Scripts\python.exe -m pip install numba==0.59.1 llvmlite==0.42.0 plyfile trimesh scikit-image nuscenes-devkit "pandas<2.2"
+```
+
+Pinned versions: Python 3.11.15, torch 2.1.0+cu121, mmcv 2.1.0, mmdet 3.2.0, mmdet3d 1.4.0, numpy 1.26.4.
+
+**Voxel upgrade (done):** the higher-accuracy voxel CenterPoint (~0.50 → ~0.65 NDS) needs `spconv` (sparse 3D conv). A prebuilt wheel installs cleanly — no source build:
+
+```powershell
+.venv-mmdet3d\Scripts\python.exe -m pip install spconv-cu120   # cu120 kernels run on the 12.8 driver
+```
+
+Verified: GPU `SubMConv3d` runs; the voxel0075 + DCN model (DCN ops come from mmcv) does a full forward pass. Use `centerpoint_voxel0075_second_secfpn_head-dcn-circlenms_8xb4-cyclic-20e_nus-3d`. Scene 0 / 40 frames → 1339 boxes; in `compare_bev` the red predictions sit tightly on the green GT with good heading agreement — visibly better localization than the pillar model. Outputs: `outputs/nuscenes_scene0_centerpoint_voxel_vs_gt.mp4`, `outputs/nuscenes_scene0_centerpoint_voxel_cameras.mp4`. The pillar model still works and needs no spconv if a lighter option is wanted.
+
+Model (23 MB, via `mim download mmdet3d --config centerpoint_pillar02_second_secfpn_head-circlenms_8xb4-cyclic-20e_nus-3d --dest checkpoints/`):
+`checkpoints/centerpoint_02pillar_second_secfpn_circlenms_4x8_cyclic_20e_nus_*.pth`
+
+Run (in the mmdet3d env) → export ego-frame boxes to JSON, then view in the main env:
+
+```powershell
+.venv-mmdet3d\Scripts\python.exe -m fsd.centerpoint_export --dataroot D:/nuscenes --config checkpoints\centerpoint_pillar02_second_secfpn_head-circlenms_8xb4-cyclic-20e_nus-3d.py --checkpoint checkpoints\centerpoint_02pillar_*.pth --scene-index 0 --frames 40 --output outputs/centerpoint_scene0.json
+.venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scenes 0 --frames 40 --view pred_bev --predictions outputs/centerpoint_scene0.json --save --output outputs/nuscenes_scene0_centerpoint_bev.mp4
+```
+
+`fsd/centerpoint_export.py` converts CenterPoint's LiDAR-sensor-frame boxes to ego frame using the LiDAR `calibrated_sensor` extrinsic and writes `{"samples": {sample_token: [...]}}` for `PredictionLoader`.
+
+**Multi-sweep fix (important).** nuScenes CenterPoint is trained on **10 accumulated LiDAR sweeps** with the per-point 5th channel set to a **time delta**. The naive `inference_detector(single .pcd.bin)` only sees one sweep — the config's `LoadPointsFromMultiSweeps` just pads by duplicating it — so the model ran on ~25k points instead of ~270k, causing visibly worse recall/localization and spurious boxes (the "prediction errors" first observed). Fix: `centerpoint_export.py` aggregates the real 10 sweeps itself (nuscenes-devkit transforms, into the current LiDAR frame, with the time channel) and strips `LoadPointsFromMultiSweeps` from the pipeline so it isn't re-padded. Effect on scene 0: ~25k → ~270k points/frame, 1339 → 985 boxes (fewer false positives), and predictions sit tightly on GT in `compare_bev`. Controlled by `--sweeps` (default 10).
 
 ## Next
 
 - [ ] **Object velocity + prediction** (Priority 3): finite-difference velocity over `instance_token` across consecutive samples → `[x, y, vx, vy]`, then constant-velocity forward prediction. Optional Kalman smoothing if GT velocities look jittery.
 - [ ] **Quantify LSS**: vehicle-seg IoU vs the GT BEV mask we already render (paper reports ~33).
 - [ ] **Lane topology** (Priority 2): lane centerlines + connectivity into a lane graph from the parsed HD map.
-- [ ] **Object detection (unblock)**: stand up a real LiDAR 3D detector (CenterPoint) on sensor data — the gate for object velocity + prediction. GT boxes are eval-only, not a live source.
-- [ ] **Planner** (Phase 2): classical/optimization trajectory planner consuming the occupancy + height tensor + lane graph. Deliberately deferred until the world model is complete enough to plan over.
+- [ ] **Object velocity + prediction** (Priority 3): now unblocked by frustum-fusion detection. Match detections across keyframes (greedy nearest by class, or a small Kalman tracker) to get per-object `[x, y, vx, vy]`, then constant-velocity short-horizon prediction. No `instance_token` crutch — track our own detections.
+- [ ] **Run + eval the detector**: render `objects_bev`/`objects_cameras` once the drive is mounted; spot-check fusion boxes against GT boxes (eval-only) to gauge position error.
+- [ ] **Lane topology** (Priority 2): vision-first (YOLOPv2 lane lines → ego BEV via ground plane), not HD-map lanes.
+- [ ] **Planner** (Phase 2): classical/optimization trajectory planner over occupancy + height tensor + lanes + predicted objects. Deferred until the world model is complete enough to plan over.
 
-Remaining Phase 1 world-modeling items: lane topology, then object detection→velocity. With height channels done, the static side of the world model is in good shape.
+Object detection is done (camera frustum fusion). The dynamic branch's next step is tracking→velocity→prediction; the static side (occupancy, height, soon lanes) is in good shape.
