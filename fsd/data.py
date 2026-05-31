@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-f`rom bisect import bisect_left
+from bisect import bisect_left
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
