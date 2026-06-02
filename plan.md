@@ -314,7 +314,7 @@ Hardens the BEV from "occupied/free" into a multi-channel world-model tensor. Ev
 
 ### Frustum-fusion object detection (`fsd/fusion_detect.py`) — dynamic layer, done
 
-The dynamic-object layer, built **hybrid** by deliberate choice: cameras detect, LiDAR ranges. Decision context is in the chat log — we keep LiDAR for geometry (occupancy/height) but do *object detection from vision*, since cameras are the scalable, semantics-capable sensor and the learned LiDAR/BEV detectors (PointPillars, BEVDet) are blocked on this env anyway.
+The dynamic-object layer, built **hybrid** by deliberate choice: cameras detect, LiDAR ranges. Decision context is in the chat log - we keep LiDAR for geometry (occupancy/height) while this branch does object detection from vision. CenterPoint is the canonical learned LiDAR 3D detector path.
 
 Pipeline per keyframe:
 1. YOLO (`yolo26n.pt`, already in repo) runs on each of the six camera images → 2D boxes + class. This is the detection decision — camera-only.
@@ -358,15 +358,12 @@ Pinned versions: Python 3.11.15, torch 2.1.0+cu121, mmcv 2.1.0, mmdet 3.2.0, mmd
 .venv-mmdet3d\Scripts\python.exe -m pip install spconv-cu120   # cu120 kernels run on the 12.8 driver
 ```
 
-Verified: GPU `SubMConv3d` runs; the voxel0075 + DCN model (DCN ops come from mmcv) does a full forward pass. Use `centerpoint_voxel0075_second_secfpn_head-dcn-circlenms_8xb4-cyclic-20e_nus-3d`. Scene 0 / 40 frames → 1339 boxes; in `compare_bev` the red predictions sit tightly on the green GT with good heading agreement — visibly better localization than the pillar model. Outputs: `outputs/nuscenes_scene0_centerpoint_voxel_vs_gt.mp4`, `outputs/nuscenes_scene0_centerpoint_voxel_cameras.mp4`. The pillar model still works and needs no spconv if a lighter option is wanted.
-
-Model (23 MB, via `mim download mmdet3d --config centerpoint_pillar02_second_secfpn_head-circlenms_8xb4-cyclic-20e_nus-3d --dest checkpoints/`):
-`checkpoints/centerpoint_02pillar_second_secfpn_circlenms_4x8_cyclic_20e_nus_*.pth`
+Verified: GPU `SubMConv3d` runs; the voxel0075 + DCN model (DCN ops come from mmcv) does a full forward pass. Use `centerpoint_voxel0075_second_secfpn_head-dcn-circlenms_8xb4-cyclic-20e_nus-3d`. Scene 0 / 40 frames -> 1339 boxes; in `compare_bev` the red predictions sit tightly on the green GT with good heading agreement. Outputs: `outputs/nuscenes_scene0_centerpoint_voxel_vs_gt.mp4`, `outputs/nuscenes_scene0_centerpoint_voxel_cameras.mp4`.
 
 Run (in the mmdet3d env) → export ego-frame boxes to JSON, then view in the main env:
 
 ```powershell
-.venv-mmdet3d\Scripts\python.exe -m fsd.centerpoint_export --dataroot D:/nuscenes --config checkpoints\centerpoint_pillar02_second_secfpn_head-circlenms_8xb4-cyclic-20e_nus-3d.py --checkpoint checkpoints\centerpoint_02pillar_*.pth --scene-index 0 --frames 40 --output outputs/centerpoint_scene0.json
+.venv-mmdet3d\Scripts\python.exe -m fsd.centerpoint_export --dataroot D:/nuscenes --config checkpoints\centerpoint_voxel0075_second_secfpn_head-dcn-circlenms_8xb4-cyclic-20e_nus-3d.py --checkpoint checkpoints\centerpoint_0075voxel_*.pth --scene-index 0 --frames 40 --output outputs/centerpoint_scene0.json
 .venv\Scripts\python.exe -m fsd.visualize --dataroot D:/nuscenes --scenes 0 --frames 40 --view pred_bev --predictions outputs/centerpoint_scene0.json --save --output outputs/nuscenes_scene0_centerpoint_bev.mp4
 ```
 
@@ -375,6 +372,8 @@ Run (in the mmdet3d env) → export ego-frame boxes to JSON, then view in the ma
 **Multi-sweep fix (important).** nuScenes CenterPoint is trained on **10 accumulated LiDAR sweeps** with the per-point 5th channel set to a **time delta**. The naive `inference_detector(single .pcd.bin)` only sees one sweep — the config's `LoadPointsFromMultiSweeps` just pads by duplicating it — so the model ran on ~25k points instead of ~270k, causing visibly worse recall/localization and spurious boxes (the "prediction errors" first observed). Fix: `centerpoint_export.py` aggregates the real 10 sweeps itself (nuscenes-devkit transforms, into the current LiDAR frame, with the time channel) and strips `LoadPointsFromMultiSweeps` from the pipeline so it isn't re-padded. Effect on scene 0: ~25k → ~270k points/frame, 1339 → 985 boxes (fewer false positives), and predictions sit tightly on GT in `compare_bev`. Controlled by `--sweeps` (default 10).
 
 ## Next
+
+- [x] **Unified BEV world model shell**: `fsd/world_model.py` now combines temporal occupancy, 2.5D LiDAR height channels, ego state, collision grid, GT boxes, and optional prediction boxes into one `BevWorldModel`. Visualize with `--view world_bev`.
 
 - [ ] **Object velocity + prediction** (Priority 3): finite-difference velocity over `instance_token` across consecutive samples → `[x, y, vx, vy]`, then constant-velocity forward prediction. Optional Kalman smoothing if GT velocities look jittery.
 - [ ] **Quantify LSS**: vehicle-seg IoU vs the GT BEV mask we already render (paper reports ~33).

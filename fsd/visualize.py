@@ -22,6 +22,7 @@ from fsd.nuscenes_map import NuScenesMapRenderer
 from fsd.occupancy import TemporalOccupancyMapper, render_occupancy_bev
 from fsd.bev_tensor import bev_tensor_from_lidar, render_bev_channels
 from fsd.fusion_detect import FrustumFusionDetector, render_fusion_bev, render_fusion_cameras
+from fsd.world_model import WorldModelBuilder, WorldModelConfig, render_world_model_bev
 
 
 def _default_output_path(view: str, scenes_label: str) -> Path:
@@ -47,7 +48,14 @@ def _render_view(
     map_renderer=None,
     occupancy_mapper=None,
     detector=None,
+    world_builder=None,
 ):
+    if view == "world_bev":
+        if world_builder is None:
+            raise RuntimeError("World model view requested but no world builder was created")
+        if lidar is None:
+            raise RuntimeError("World model view requested but no LiDAR frame was loaded")
+        return render_world_model_bev(world_builder.step(frame, lidar), scale=bev_scale)
     if view in {"objects_bev", "objects_cameras"}:
         if detector is None:
             raise RuntimeError("Object detection view requested but no detector was created")
@@ -180,6 +188,7 @@ def run_visualizer(
         "height_bev",
         "objects_bev",
         "objects_cameras",
+        "world_bev",
         "all",
     }
     if view not in valid_views:
@@ -210,20 +219,23 @@ def run_visualizer(
         "height_bev",
         "objects_bev",
         "objects_cameras",
+        "world_bev",
     ]
     views = all_views if view == "all" else [view]
     include_lidar = any(
         v in {
             "lidar", "bev", "gt_bev", "pred_bev", "compare_bev", "lss_lidar_bev",
-            "occupancy_bev", "height_bev", "objects_bev", "objects_cameras",
+            "occupancy_bev", "planner_bev", "planner_camera", "height_bev", "objects_bev", "objects_cameras",
+            "world_bev",
         }
         for v in views
     )
-    needs_gt = any(v in {"gt_bev", "compare_bev", "box_cameras"} for v in views)
+    needs_gt = any(v in {"gt_bev", "compare_bev", "box_cameras", "world_bev"} for v in views)
     needs_predictions = any(v in {"pred_bev", "compare_bev", "pred_cameras"} for v in views)
     needs_lss = any(v in {"lss_bev", "lss_lidar_bev"} for v in views)
     needs_occupancy = "occupancy_bev" in views
     needs_detector = any(v in {"objects_bev", "objects_cameras"} for v in views)
+    needs_world = "world_bev" in views
     annotation_loader = NuScenesAnnotationLoader(loader) if needs_gt else None
     prediction_loader = PredictionLoader(predictions_path) if predictions_path else None
     if needs_predictions and prediction_loader is None:
@@ -240,6 +252,24 @@ def run_visualizer(
         except FileNotFoundError:
             map_renderer = None
     detector = FrustumFusionDetector(weights_path=yolo_weights, device=detector_device) if needs_detector else None
+    planner_runtime = (
+        OfflinePlanningRuntime(OfflinePlanningRuntimeConfig(resolution=bev_resolution))
+        if needs_planner
+        else None
+    )
+    world_builder = (
+        WorldModelBuilder(
+            WorldModelConfig(
+                resolution=bev_resolution,
+                min_lidar_points=min_lidar_points,
+                score_threshold=score_threshold,
+            ),
+            annotation_loader=annotation_loader,
+            prediction_loader=prediction_loader,
+        )
+        if needs_world
+        else None
+    )
 
     scenes_label = f"scene{scene_indices[0]}" if len(scene_indices) == 1 else f"scenes{scene_indices[0]}-{scene_indices[-1]}"
     outputs: dict[str, Path] = {}
@@ -268,6 +298,10 @@ def run_visualizer(
 
             # Occupancy is stateful — fresh rolling grid per scene.
             occupancy_mapper = TemporalOccupancyMapper(resolution=bev_resolution) if needs_occupancy else None
+            if planner_runtime is not None:
+                planner_runtime.reset()
+            if world_builder is not None:
+                world_builder.reset()
 
             if sequence == "sweeps":
                 frame_iter = (
@@ -317,6 +351,7 @@ def run_visualizer(
                         map_renderer=map_renderer,
                         occupancy_mapper=occupancy_mapper,
                         detector=detector,
+                        world_builder=world_builder,
                     )
                     cv2.putText(
                         image,
@@ -384,6 +419,7 @@ def parse_args() -> argparse.Namespace:
             "height_bev",
             "objects_bev",
             "objects_cameras",
+            "world_bev",
             "all",
         ),
         default="lidar",
@@ -406,7 +442,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bev-resolution", type=float, default=0.25, help="BEV grid meters per cell.")
     parser.add_argument("--bev-scale", type=int, default=2, help="Nearest-neighbor scale for BEV output.")
     parser.add_argument("--min-lidar-points", type=int, default=1, help="Minimum LiDAR points required per GT box.")
-    parser.add_argument("--predictions", default=None, help="Path to PointPillars/MMDetection3D prediction JSON.")
+    parser.add_argument("--predictions", default=None, help="Path to CenterPoint/MMDetection3D prediction JSON.")
     parser.add_argument("--score-threshold", type=float, default=0.1, help="Minimum prediction confidence to draw.")
     parser.add_argument("--lss-weights", default=None, help="Path to pretrained LSS BEV vehicle-seg checkpoint.")
     parser.add_argument("--lss-threshold", type=float, default=0.4, help="LSS vehicle-seg probability threshold for overlays.")

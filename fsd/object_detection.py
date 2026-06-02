@@ -257,7 +257,7 @@ def make_ego_box(
 
 
 class PredictionLoader:
-    """Load predicted 3D boxes exported by a detector such as PointPillars.
+    """Load predicted 3D boxes exported by a detector such as CenterPoint.
 
     Supported formats:
     1. {"results": {sample_token: [nuScenes global-box records...]}}
