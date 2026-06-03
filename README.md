@@ -67,6 +67,8 @@ nuScenes is organised as ~850 independent 20-second driving clips (called scenes
 | `lss_bev` | Camera-only BEV vehicle prediction from Lift-Splat-Shoot, drawn on top of the nuScenes HD map |
 | `lss_lidar_bev` | LSS prediction blended onto the LiDAR BEV for a direct sanity check |
 | `occupancy_bev` | Temporal log-odds occupancy map fused across keyframes into a rolling world model |
+| `planner_bev` | Offline LiDAR BEV planner: candidate trajectories, selected path, and collision context |
+| `planner_camera` | Front-camera overlay with selected path projected onto video and a compact BEV panel |
 | `height_bev` | 2.5D BEV tensor - per-cell point density and min/max/mean/range height channels |
 | `world_bev` | Unified BEV world model: occupancy, height/collision context, ego state, and object footprints |
 | `all` | All views rendered simultaneously |

@@ -18,6 +18,8 @@ from fsd.object_detection import (
     render_gt_prediction_bev,
 )
 from fsd.lss import LSSInference, overlay_lss_on_lidar_bev, render_lss_bev
+from fsd.motion_planning.render import render_planning_camera_result, render_planning_result
+from fsd.motion_planning.runner import OfflinePlanningRuntime, OfflinePlanningRuntimeConfig
 from fsd.nuscenes_map import NuScenesMapRenderer
 from fsd.occupancy import TemporalOccupancyMapper, render_occupancy_bev
 from fsd.bev_tensor import bev_tensor_from_lidar, render_bev_channels
@@ -47,9 +49,24 @@ def _render_view(
     lss_threshold=0.4,
     map_renderer=None,
     occupancy_mapper=None,
+    planner_runtime=None,
     detector=None,
     world_builder=None,
 ):
+    if view == "planner_bev":
+        if planner_runtime is None:
+            raise RuntimeError("Planner BEV view requested but no planner runtime was created")
+        if lidar is None:
+            raise RuntimeError("Planner BEV view requested but no LiDAR frame was loaded")
+        result = planner_runtime.step(frame, lidar)
+        return render_planning_result(result, scale=bev_scale)
+    if view == "planner_camera":
+        if planner_runtime is None:
+            raise RuntimeError("Planner camera view requested but no planner runtime was created")
+        if lidar is None:
+            raise RuntimeError("Planner camera view requested but no LiDAR frame was loaded")
+        result = planner_runtime.step(frame, lidar)
+        return render_planning_camera_result(frame, lidar, result, tile_width=tile_width)
     if view == "world_bev":
         if world_builder is None:
             raise RuntimeError("World model view requested but no world builder was created")
@@ -185,6 +202,8 @@ def run_visualizer(
         "lss_bev",
         "lss_lidar_bev",
         "occupancy_bev",
+        "planner_bev",
+        "planner_camera",
         "height_bev",
         "objects_bev",
         "objects_cameras",
@@ -216,6 +235,8 @@ def run_visualizer(
         "lss_bev",
         "lss_lidar_bev",
         "occupancy_bev",
+        "planner_bev",
+        "planner_camera",
         "height_bev",
         "objects_bev",
         "objects_cameras",
@@ -234,6 +255,7 @@ def run_visualizer(
     needs_predictions = any(v in {"pred_bev", "compare_bev", "pred_cameras"} for v in views)
     needs_lss = any(v in {"lss_bev", "lss_lidar_bev"} for v in views)
     needs_occupancy = "occupancy_bev" in views
+    needs_planner = any(v in {"planner_bev", "planner_camera"} for v in views)
     needs_detector = any(v in {"objects_bev", "objects_cameras"} for v in views)
     needs_world = "world_bev" in views
     annotation_loader = NuScenesAnnotationLoader(loader) if needs_gt else None
@@ -350,6 +372,7 @@ def run_visualizer(
                         lss_threshold=lss_threshold,
                         map_renderer=map_renderer,
                         occupancy_mapper=occupancy_mapper,
+                        planner_runtime=planner_runtime,
                         detector=detector,
                         world_builder=world_builder,
                     )
@@ -416,6 +439,8 @@ def parse_args() -> argparse.Namespace:
             "lss_bev",
             "lss_lidar_bev",
             "occupancy_bev",
+            "planner_bev",
+            "planner_camera",
             "height_bev",
             "objects_bev",
             "objects_cameras",
