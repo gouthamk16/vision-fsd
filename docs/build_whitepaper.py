@@ -95,6 +95,22 @@ def diagram_pipeline() -> Path:
     arrow(89, 19, 89, 14)
     fig.savefig(path, dpi=200, transparent=True, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
+    return _autocrop(path)
+
+
+def _autocrop(path: Path, pad: int = 10) -> Path:
+    """Trim transparent borders so the reserved PDF height matches visible content."""
+    im = Image.open(path)
+    if im.mode != "RGBA":
+        return path
+    bbox = im.getbbox()
+    if bbox is None:
+        return path
+    left = max(0, bbox[0] - pad)
+    top = max(0, bbox[1] - pad)
+    right = min(im.width, bbox[2] + pad)
+    bottom = min(im.height, bbox[3] + pad)
+    im.crop((left, top, right, bottom)).save(path)
     return path
 
 
@@ -102,7 +118,7 @@ def _save(fig, name):
     path = ASSETS / name
     fig.savefig(path, dpi=200, transparent=True, bbox_inches="tight", pad_inches=0.06)
     plt.close(fig)
-    return path
+    return _autocrop(path)
 
 
 def diagram_frames():
@@ -422,8 +438,12 @@ class Doc(FPDF):
         h_mm = h_px / w_px * w_mm
         self.ensure(h_mm + 8)
         self.ln(1)
-        self.image(str(png), x=18 + (CONTENT_W - w_mm) / 2, w=w_mm, h=h_mm)
-        self.set_y(self.get_y() + h_mm + 1.5)
+        y0 = self.get_y()
+        # pass y explicitly and set the cursor absolutely: fpdf2's image() already
+        # advances y by the height, so adding it again double-counts and strands a
+        # full image-height of blank space below the figure.
+        self.image(str(png), x=18 + (CONTENT_W - w_mm) / 2, y=y0, w=w_mm, h=h_mm)
+        self.set_y(y0 + h_mm + 1.5)
         if caption:
             self.caption(caption)
 
@@ -686,10 +706,6 @@ def build():
         caption="fsd/occupancy.py - WARP_INVERSE_MAP is essential: M already maps current-frame "
                 "pixels to previous-frame pixels, and the flag stops OpenCV inverting it again.")
 
-    d.image_block(diagram_occupancy(), width_frac=1.0,
-                  caption="Figure 3. One temporal occupancy update: warp the prior grid into the new "
-                          "ego frame, decay it toward unknown, then fuse fresh LiDAR hit/miss evidence.")
-
     d.h2("5.3  Evidence: a height split, not ray casting")
     d.para("Fresh evidence comes from a deliberately simple rule. Points are rasterized to "
            "cells; returns below ground_height (0.3 m in the ego frame) mark their cell "
@@ -709,6 +725,10 @@ def build():
            "as occupied. Marking only observed cells, split by height, keeps the road out of "
            "the occupied set. Verified synthetically: 2 m forward motion moves a 20 m wall to "
            "18 m; a +90 deg yaw moves a point straight ahead to the right.")
+
+    d.image_block(diagram_occupancy(), width_frac=1.0,
+                  caption="Figure 3. One temporal occupancy update: warp the prior grid into the new "
+                          "ego frame, decay it toward unknown, then fuse fresh LiDAR hit/miss evidence.")
 
     # ===================================================================== 6
     d.h1("3D Object Detection", num=6)
