@@ -43,7 +43,7 @@ CONTENT_W = 174.0  # A4 width 210 - 2*18 margin
 _eq_cache: dict[str, Path] = {}
 
 
-def eq_png(latex: str, fontsize: int = 17, dpi: int = 220) -> Path:
+def eq_png(latex: str, fontsize: float = 12.5, dpi: int = 300) -> Path:
     key = f"{latex}|{fontsize}|{dpi}"
     if key in _eq_cache:
         return _eq_cache[key]
@@ -98,6 +98,187 @@ def diagram_pipeline() -> Path:
     return path
 
 
+def _save(fig, name):
+    path = ASSETS / name
+    fig.savefig(path, dpi=200, transparent=True, bbox_inches="tight", pad_inches=0.06)
+    plt.close(fig)
+    return path
+
+
+def diagram_frames():
+    import numpy as np
+    fig, ax = plt.subplots(figsize=(8.4, 3.0))
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 42)
+    ax.axis("off")
+
+    def triad(ox, oy, ang, label, color, L=9):
+        a = np.radians(ang)
+        ax.annotate("", xy=(ox + L * np.cos(a), oy + L * np.sin(a)), xytext=(ox, oy),
+                    arrowprops=dict(arrowstyle="-|>", color=color, lw=1.7))
+        ax.annotate("", xy=(ox + L * np.cos(a + np.pi / 2), oy + L * np.sin(a + np.pi / 2)),
+                    xytext=(ox, oy), arrowprops=dict(arrowstyle="-|>", color=color, lw=1.7))
+        ax.plot(ox, oy, "o", color=color, ms=3.5)
+        ax.text(ox, oy - 4.5, label, ha="center", va="top", fontsize=9, color=color, weight="bold")
+
+    triad(11, 13, 33, "global (map)", "#1c5ca8")
+    triad(47, 17, 6, "ego (body)", "#3f7a3f")
+    triad(82, 24, -16, "sensor", "#9e4018")
+
+    ax.annotate("", xy=(56, 18), xytext=(76, 24),
+                arrowprops=dict(arrowstyle="-|>", color="#5a6068", lw=1.4,
+                                connectionstyle="arc3,rad=-0.18"))
+    ax.text(67, 30, "calibrated_sensor\nR, t : sensor -> ego", ha="center", fontsize=7.6)
+    ax.annotate("", xy=(20, 15), xytext=(43, 17),
+                arrowprops=dict(arrowstyle="-|>", color="#5a6068", lw=1.4,
+                                connectionstyle="arc3,rad=-0.18"))
+    ax.text(31, 22, "ego_pose\nR, t : ego -> global", ha="center", fontsize=7.6)
+    ax.text(50, 3, "cameras invert this chain (global -> ego -> sensor) to project into the image",
+            ha="center", fontsize=7.4, style="italic", color="#6e747e")
+    return _save(fig, "frames.png")
+
+
+def diagram_bev_grid():
+    import numpy as np
+    fig, ax = plt.subplots(figsize=(4.7, 4.7))
+    n = 10
+    ax.set_xlim(-0.5, n + 1.5)
+    ax.set_ylim(-0.5, n + 1.5)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    for i in range(n + 1):
+        ax.plot([0, n], [i, i], color="#d6dae0", lw=0.8, zorder=1)
+        ax.plot([i, i], [0, n], color="#d6dae0", lw=0.8, zorder=1)
+    # ego at centre, forward = up
+    ax.add_patch(plt.Rectangle((n / 2 - 0.35, n / 2 - 0.6), 0.7, 1.2,
+                               facecolor="#3f7a3f", edgecolor="#26492a", zorder=4))
+    ax.annotate("", xy=(n / 2, n / 2 + 2.0), xytext=(n / 2, n / 2),
+                arrowprops=dict(arrowstyle="-|>", color="#26492a", lw=1.6), zorder=4)
+    ax.text(n / 2 + 0.25, n / 2 + 1.9, "+x (forward)", fontsize=7.6, color="#26492a", va="center")
+    ax.annotate("", xy=(n / 2 - 2.0, n / 2), xytext=(n / 2, n / 2),
+                arrowprops=dict(arrowstyle="-|>", color="#26492a", lw=1.6), zorder=4)
+    ax.text(n / 2 - 2.1, n / 2 + 0.4, "+y (left)", fontsize=7.6, color="#26492a", ha="center")
+    # a sample point and its cell
+    px, py = 7.5, 7.5
+    ax.add_patch(plt.Rectangle((int(px), int(py)), 1, 1, facecolor="#f0b67a",
+                               edgecolor="#9e4018", zorder=3))
+    ax.plot(px, py, "o", color="#9e4018", ms=4, zorder=5)
+    ax.text(px + 0.2, py + 0.25, "point (x, y)", fontsize=7.6, color="#9e4018")
+    ax.annotate("row = (x_max - x) / d", xy=(int(px) + 0.5, int(py)), xytext=(n + 0.3, 3.2),
+                fontsize=7.4, color="#9e4018",
+                arrowprops=dict(arrowstyle="-", color="#9e4018", lw=0.8))
+    ax.annotate("col = (y_max - y) / d", xy=(int(px), int(py) + 0.5), xytext=(n + 0.3, 2.2),
+                fontsize=7.4, color="#9e4018",
+                arrowprops=dict(arrowstyle="-", color="#9e4018", lw=0.8))
+    ax.text(n / 2, n + 0.9, "metric window [x_min,x_max] x [y_min,y_max] at d m/cell",
+            ha="center", fontsize=7.8, color="#3a3f47")
+    ax.text(n / 2, -0.2, "row 0 = top (far forward),   col 0 = left",
+            ha="center", va="top", fontsize=7.2, color="#6e747e")
+    return _save(fig, "bev_grid.png")
+
+
+def diagram_occupancy():
+    import numpy as np
+    fig, ax = plt.subplots(figsize=(8.6, 3.2))
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 40)
+    ax.axis("off")
+
+    def grid(cx, cy, wall_row, title):
+        s = 2.2
+        m = 6
+        for r in range(m):
+            for c in range(m):
+                col = "#9aa0a8"  # unknown gray
+                if r == wall_row:
+                    col = "#ffba3a"  # occupied
+                elif r > wall_row:
+                    col = "#243f5a"  # free corridor (navy) behind nothing... below wall toward ego
+                ax.add_patch(plt.Rectangle((cx + c * s, cy + r * s), s * 0.94, s * 0.94,
+                                           facecolor=col, edgecolor="none"))
+        ax.text(cx + m * s / 2, cy - 2.4, title, ha="center", fontsize=8, color="#3a3f47")
+        # ego marker bottom centre
+        ax.add_patch(plt.Rectangle((cx + m * s / 2 - 1.0, cy - 0.2), 2.0, 1.6,
+                                   facecolor="#3f7a3f", edgecolor="none"))
+
+    grid(4, 12, 1, "prior grid (t-1)")
+    grid(70, 12, 2, "posterior grid (t)")
+
+    def op(x, label):
+        ax.add_patch(plt.Rectangle((x, 18), 13, 7, facecolor="#eef2f7", edgecolor="#9aa6b4", lw=1.1))
+        ax.text(x + 6.5, 21.5, label, ha="center", va="center", fontsize=7.4)
+
+    op(30, "1. warp\nSE(2) ego motion")
+    op(46, "2. decay\nl <- gamma l")
+    ax.annotate("", xy=(30, 21.5), xytext=(26, 21.5),
+                arrowprops=dict(arrowstyle="-|>", color="#5a6068", lw=1.3))
+    ax.annotate("", xy=(46, 21.5), xytext=(43, 21.5),
+                arrowprops=dict(arrowstyle="-|>", color="#5a6068", lw=1.3))
+    ax.annotate("", xy=(70, 21.5), xytext=(59, 21.5),
+                arrowprops=dict(arrowstyle="-|>", color="#5a6068", lw=1.3))
+    ax.text(64.5, 24.0, "3. fuse\nLiDAR hit/miss", ha="center", fontsize=7.4)
+    ax.text(50, 6.5, "the wall moves one row closer as the ego drives forward; "
+                     "evidence accumulates instead of resetting each frame",
+            ha="center", fontsize=7.4, style="italic", color="#6e747e")
+    ax.text(7, 30, "amber = occupied   navy = free   gray = unknown",
+            fontsize=7.2, color="#6e747e")
+    return _save(fig, "occupancy.png")
+
+
+def diagram_lattice():
+    import numpy as np
+    fig, ax = plt.subplots(figsize=(5.4, 4.6))
+    ax.set_xlim(-13, 13)
+    ax.set_ylim(-1.5, 17)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    # obstacle (blocked region) ahead and to the left
+    ax.add_patch(plt.Rectangle((-9.5, 8.5), 5.5, 4.5, facecolor="#f4c9c2",
+                               edgecolor="#b5382a", lw=1.2, zorder=2))
+    ax.text(-6.75, 10.75, "blocked", ha="center", va="center", fontsize=8, color="#b5382a", zorder=3)
+
+    def arc(curv, dist=15.0, n=40):
+        xs, ys, x, y, yaw = [], [], 0.0, 0.0, np.pi / 2  # heading up
+        step = dist / n
+        for _ in range(n):
+            if abs(curv) < 1e-9:
+                x += step * np.cos(yaw); y += step * np.sin(yaw)
+            else:
+                nyaw = yaw + curv * step
+                x += (np.sin(nyaw) - np.sin(yaw)) / curv
+                y += (-np.cos(nyaw) + np.cos(yaw)) / curv
+                yaw = nyaw
+            xs.append(x); ys.append(y)
+        return np.array(xs), np.array(ys)
+
+    def hits_obstacle(xs, ys):
+        return np.any((xs >= -9.5) & (xs <= -4.0) & (ys >= 8.5) & (ys <= 13.0))
+
+    curvs = [-0.13, -0.09, -0.05, 0.0, 0.05, 0.09, 0.13]
+    selected = 0.05
+    for cu in curvs:
+        xs, ys = arc(cu)
+        if hits_obstacle(xs, ys):
+            ax.plot(xs, ys, color="#d98c84", lw=1.4, zorder=2)
+            ax.plot(xs[-1], ys[-1], "x", color="#b5382a", ms=5, zorder=3)
+        elif cu == selected:
+            ax.plot(xs, ys, color="#2e8b3d", lw=2.6, zorder=4)
+            ax.plot(xs[-1], ys[-1], "o", color="#2e8b3d", ms=5, zorder=4)
+        else:
+            ax.plot(xs, ys, color="#9aa0a8", lw=1.4, zorder=2)
+
+    ax.add_patch(plt.Rectangle((-0.7, -1.2), 1.4, 2.4, facecolor="#3f7a3f",
+                               edgecolor="#26492a", zorder=5))
+    ax.add_patch(plt.Circle((0, 0), 1.25, facecolor="none", edgecolor="#3f7a3f",
+                            lw=1.0, ls="--", zorder=4))
+    ax.text(8.5, 1.5, "green = selected\n(lowest cost)", fontsize=7.6, color="#2e8b3d")
+    ax.text(8.5, 13.5, "red = rejected\n(collision)", fontsize=7.6, color="#b5382a")
+    ax.text(0, -2.0, "ego: dashed disc = 1.25 m footprint radius",
+            ha="center", va="top", fontsize=7.2, color="#6e747e")
+    return _save(fig, "lattice.png")
+
+
 # ---- pdf builder ------------------------------------------------------------
 class Doc(FPDF):
     def __init__(self):
@@ -110,6 +291,7 @@ class Doc(FPDF):
         self.add_font("M", "", str(FONTS / "consola.ttf"))
         self.add_font("M", "B", str(FONTS / "consolab.ttf"))
         self._title_mode = False
+        self._eqno = 0
 
     def footer(self):
         if self._title_mode:
@@ -209,20 +391,30 @@ class Doc(FPDF):
         else:
             self.ln(1.5)
 
-    def equation(self, latex, fontsize=17, scale=1.0):
-        png = eq_png(latex, fontsize=fontsize)
+    def equation(self, latex, fontsize=12.5, number=True):
+        dpi = 300
+        png = eq_png(latex, fontsize=fontsize, dpi=dpi)
         w_px, h_px = Image.open(png).size
-        w_mm = w_px / 220 * 25.4 * scale
-        h_mm = h_px / 220 * 25.4 * scale
-        max_w = CONTENT_W - 20
+        w_mm = w_px / dpi * 25.4
+        h_mm = h_px / dpi * 25.4
+        max_w = 124.0  # research-paper display width, not full content width
         if w_mm > max_w:
             h_mm *= max_w / w_mm
             w_mm = max_w
-        self.ensure(h_mm + 5)
-        self.ln(1.5)
-        self.image(str(png), x=18 + (CONTENT_W - w_mm) / 2, w=w_mm, h=h_mm)
-        self.set_y(self.get_y() + h_mm)
-        self.ln(2.5)
+        self.ensure(h_mm + 7)
+        # centered display block with a little breathing room above/below
+        self.ln(2.0)
+        y0 = self.get_y()
+        self.image(str(png), x=18 + (CONTENT_W - w_mm) / 2, y=y0, w=w_mm, h=h_mm)
+        if number:
+            self._eqno += 1
+            self.set_font("A", "", 9.5)
+            self.set_text_color(*MUTED)
+            self.set_xy(18, y0 + h_mm / 2 - 2.2)
+            self.cell(CONTENT_W, 4.4, f"({self._eqno})", align="R")
+        self.set_y(y0 + h_mm)
+        self.ln(3.0)
+        self.set_text_color(*INK)
 
     def image_block(self, png, width_frac=0.92, caption=None):
         w_px, h_px = Image.open(png).size
@@ -274,8 +466,8 @@ def build():
     # ===================================================================== 1
     d.h1("System Overview", num=1)
     d.para(
-        "The 360 pipeline turns one nuScenes keyframe — six surround cameras, one 32-beam "
-        "LiDAR sweep, and the vehicle's ego pose — into a **bird's-eye-view (BEV) world "
+        "The 360 pipeline turns one nuScenes keyframe - six surround cameras, one 32-beam "
+        "LiDAR sweep, and the vehicle's ego pose - into a **bird's-eye-view (BEV) world "
         "model**: a top-down, metric, ego-centred description of the scene that a planner "
         "can reason over. The defining design move is the shift from a **frame-centric** "
         "system (process a frame, draw it, discard it) to a **stateful** one that warps and "
@@ -336,7 +528,7 @@ def build():
         "            if depth == 0:\n"
         "                text = ''.join(lines).strip().rstrip(',')\n"
         "                yield json.loads(text); collecting = False; lines = []",
-        caption="fsd/data.py — brace-counting streaming parser; tokens are cached on first hit.")
+        caption="fsd/data.py - brace-counting streaming parser; tokens are cached on first hit.")
     d.para(
         "Frames are exposed as immutable dataclasses: `CameraFrame` (image path + intrinsic + "
         "extrinsic + ego pose), `LidarFrame` (point-cloud path + extrinsic + ego pose), and "
@@ -344,11 +536,11 @@ def build():
         "are loaded lazily, only when a view actually needs them.")
 
     d.h2("2.2  The three frames")
-    d.bullet("**Sensor frame** — raw measurements (LiDAR points, camera rays) in the sensor's "
+    d.bullet("**Sensor frame** - raw measurements (LiDAR points, camera rays) in the sensor's "
              "own axes.")
-    d.bullet("**Ego frame** — the vehicle body frame at one timestamp: x forward, y left, "
+    d.bullet("**Ego frame** - the vehicle body frame at one timestamp: x forward, y left, "
              "z up. The world model lives here.")
-    d.bullet("**Global frame** — a fixed map frame per log. Ego motion across time is "
+    d.bullet("**Global frame** - a fixed map frame per log. Ego motion across time is "
              "expressed here, which is what makes temporal fusion possible.")
     d.para("Every transform is rigid: a rotation R and a translation t. nuScenes stores "
            "rotations as unit quaternions in **w, x, y, z** order. The conversion to a 3x3 "
@@ -358,14 +550,18 @@ def build():
         "R = | 1-2(y2+z2)   2(xy-zw)    2(xz+yw) |\n"
         "    | 2(xy+zw)     1-2(x2+z2)  2(yz-xw) |\n"
         "    | 2(xz-yw)     2(yz+xw)    1-2(x2+y2) |",
-        caption="fsd/lidar_projection.py — quaternion_to_rotation_matrix (x2 == x squared).")
+        caption="fsd/lidar_projection.py - quaternion_to_rotation_matrix (x2 == x squared).")
     d.para("A source->target transform and its exact inverse are the two workhorses of the "
            "whole codebase (points are stored as row vectors, hence the transpose):")
     d.equation(r"\mathbf{p}_{\mathrm{tgt}} = \mathbf{p}_{\mathrm{src}}\,R^{\top} + \mathbf{t}"
                r"\qquad\Longleftrightarrow\qquad"
                r"\mathbf{p}_{\mathrm{src}} = (\mathbf{p}_{\mathrm{tgt}} - \mathbf{t})\,R")
-    d.para("These two functions — `transform_points` and `inverse_transform_points` — compose "
+    d.para("These two functions - `transform_points` and `inverse_transform_points` - compose "
            "into every sensor->ego->global->sensor chain that follows.")
+
+    d.image_block(diagram_frames(), width_frac=1.0,
+                  caption="Figure 1. The three coordinate frames and the rigid transforms between "
+                          "them. LiDAR points flow sensor -> ego -> global; cameras invert the chain.")
 
     # ===================================================================== 3
     d.h1("LiDAR Geometry: Projection and BEV", num=3)
@@ -384,7 +580,7 @@ def build():
         "points = transform_points(points,    lidar.ego.rot, lidar.ego.trans)    # -> global\n"
         "points = inverse_transform_points(points, cam.ego.rot, cam.ego.trans)   # -> ego(cam)\n"
         "points = inverse_transform_points(points, cam.cs.rot,  cam.cs.trans)    # -> camera",
-        caption="fsd/lidar_projection.py — lidar_points_to_camera.")
+        caption="fsd/lidar_projection.py - lidar_points_to_camera.")
     d.para("Camera-frame points are then projected to pixels with the pinhole intrinsic K. "
            "Points behind the image plane (z <= min_depth) are dropped first:")
     d.equation(r"\mathbf{u} = \frac{1}{z}\,K\,\mathbf{p}_{\mathrm{cam}},"
@@ -393,16 +589,20 @@ def build():
            "read as a depth image overlaid on each of the six cameras.")
 
     d.h2("3.2  Ego-frame BEV rasterization")
-    d.para("The BEV is a top-down grid over a metric window — default x,y in [-50, 50] m at "
+    d.para("The BEV is a top-down grid over a metric window - default x,y in [-50, 50] m at "
            "0.25 m/cell, giving a 400x400 grid. Sensor points are first moved into the ego "
            "frame, then each surviving point's metric (x, y) maps to an integer (row, col). "
            "Forward (+x) is up, left (+y) is left, so:")
     d.equation(r"\mathrm{row} = \left\lfloor\frac{x_{\max}-x}{\Delta}\right\rfloor,"
                r"\qquad \mathrm{col} = \left\lfloor\frac{y_{\max}-y}{\Delta}\right\rfloor")
+    d.image_block(diagram_bev_grid(), width_frac=0.62,
+                  caption="Figure 2. Ego-frame BEV rasterization. Each metric (x, y) maps to an "
+                          "integer (row, col); forward is up, left is left. The same map is reused "
+                          "by every BEV layer so they overlay cleanly.")
     d.para("with grid resolution **Delta** (metres per cell). Points outside the window or "
            "outside a z-band are masked out; the rest are coloured by height (TURBO) and "
            "written to the canvas. This same metric->pixel map, with the same origin "
-           "convention, is reused by the height tensor, the occupancy grid, and box drawing — "
+           "convention, is reused by the height tensor, the occupancy grid, and box drawing - "
            "consistency here is what lets the layers overlay cleanly.")
 
     # ===================================================================== 4
@@ -410,14 +610,14 @@ def build():
     d.para(
         "A plain BEV only records 'cell has points or not'. The 2.5D tensor keeps the "
         "vertical structure that a single occupancy bit throws away. Every channel is derived "
-        "from the LiDAR sweep alone — no labels, no map — so it is deployable on a real "
+        "from the LiDAR sweep alone - no labels, no map - so it is deployable on a real "
         "vehicle. It is the data structure downstream modules read instead of re-rasterizing "
         "raw points.")
     d.h3("Per-cell channels")
-    d.bullet("**density** — point count in the cell (surface support / confidence).")
-    d.bullet("**max_height / min_height / mean_height** — vertical extremes and average of "
+    d.bullet("**density** - point count in the cell (surface support / confidence).")
+    d.bullet("**max_height / min_height / mean_height** - vertical extremes and average of "
              "returns in the cell.")
-    d.bullet("**height_range** = max_height - min_height — the discriminative one.")
+    d.bullet("**height_range** = max_height - min_height - the discriminative one.")
     d.para("The key insight: **height_range** separates drivable surface from obstacles with "
            "pure geometry. Flat road produces returns at nearly one height, so its range is "
            "~0; a car or wall spans a large vertical extent, so its range is large. No "
@@ -436,7 +636,7 @@ def build():
         "occupied = count > 0\n"
         "mean = where(occupied, zsum / maximum(count, 1), 0.0)\n"
         "height_range = where(occupied, zmax - zmin, 0.0)",
-        caption="fsd/bev_tensor.py — compute_bev_height_channels. np.add.at / maximum.at are "
+        caption="fsd/bev_tensor.py - compute_bev_height_channels. np.add.at / maximum.at are "
                 "the unbuffered scatter ops that make repeated cell hits accumulate correctly.")
     d.para("`BevTensor.stack()` returns an (H, W, 5) float array in channel order. Verified "
            "synthetically: a 2.5 m wall column reads ~2.5 m height_range; flat ground reads "
@@ -465,7 +665,7 @@ def build():
     d.h2("5.2  Warping the prior into the current frame")
     d.para("Between two keyframes the ego moves. To keep the grid ego-centred, the previous "
            "grid must be resampled into the new frame. The relative planar motion is an SE(2) "
-           "built from the two global ego poses — it maps a point expressed in the *current* "
+           "built from the two global ego poses - it maps a point expressed in the *current* "
            "ego frame back to the *previous* ego frame:")
     d.equation(r"R_{\mathrm{rel}} = R_{\mathrm{prev}}^{\top} R_{\mathrm{cur}},"
                r"\qquad \mathbf{t}_{\mathrm{rel}} = R_{\mathrm{prev}}^{\top}"
@@ -483,8 +683,12 @@ def build():
         "logodds = cv2.warpAffine(logodds, M, (w, h),\n"
         "          flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,  # M already maps cur->prev\n"
         "          borderValue=0.0)   # outside = unknown",
-        caption="fsd/occupancy.py — WARP_INVERSE_MAP is essential: M already maps current-frame "
+        caption="fsd/occupancy.py - WARP_INVERSE_MAP is essential: M already maps current-frame "
                 "pixels to previous-frame pixels, and the flag stops OpenCV inverting it again.")
+
+    d.image_block(diagram_occupancy(), width_frac=1.0,
+                  caption="Figure 3. One temporal occupancy update: warp the prior grid into the new "
+                          "ego frame, decay it toward unknown, then fuse fresh LiDAR hit/miss evidence.")
 
     d.h2("5.3  Evidence: a height split, not ray casting")
     d.para("Fresh evidence comes from a deliberately simple rule. Points are rasterized to "
@@ -498,7 +702,7 @@ def build():
         "free[occ] = False\n"
         "logodds[free] += -logit_miss\n"
         "logodds[occ]  += +logit_hit",
-        caption="fsd/occupancy.py — _evidence + step.")
+        caption="fsd/occupancy.py - _evidence + step.")
     d.para("Why not ray-cast free space? An earlier polar 'nearest-hit' free-space polygon was "
            "dropped: ground returns are the nearest hit in nearly every direction, so casting "
            "free space up to the first hit both collapsed the free region and painted the road "
@@ -508,7 +712,7 @@ def build():
 
     # ===================================================================== 6
     d.h1("3D Object Detection", num=6)
-    d.para("Objects enter the world model as ego-frame `Box3D` records — center, size "
+    d.para("Objects enter the world model as ego-frame `Box3D` records - center, size "
            "(w, l, h), yaw, and 2D/3D corners. Three independent routes produce them.")
 
     d.h2("6.1  Ground-truth boxes from annotations")
@@ -523,7 +727,7 @@ def build():
            "skipped, and the nuScenes category strings are folded into a small class set "
            "(car, truck, bus, trailer, motorcycle, bicycle, pedestrian, ...).")
 
-    d.h2("6.2  CenterPoint — a real learned LiDAR detector")
+    d.h2("6.2  CenterPoint - a real learned LiDAR detector")
     d.para("The canonical path is pretrained **CenterPoint** (mmdet3d). The OpenMMLab stack "
            "would not build on the main environment (Py3.12 / Torch 2.7 / CUDA 12.8, no "
            "prebuilt mmcv), so it lives in a separate pinned env (`.venv-mmdet3d`: Py3.11, "
@@ -534,8 +738,8 @@ def build():
            "per-point 5th channel set to a time delta. Naively running inference on a single "
            ".pcd.bin feeds the model ~25k points instead of ~270k (the config's multi-sweep "
            "loader just pads by duplication), which visibly hurt recall and produced spurious "
-           "boxes. The exporter aggregates the real 10 sweeps itself — transforming each older "
-           "sweep into the current LiDAR frame and stamping its time delta — then strips the "
+           "boxes. The exporter aggregates the real 10 sweeps itself - transforming each older "
+           "sweep into the current LiDAR frame and stamping its time delta - then strips the "
            "pipeline's `LoadPointsFromMultiSweeps` so it is not re-padded.")
     d.code(
         "ref_from_car  = T(ref_cs, inverse=True)      # current LiDAR sensor <- ego\n"
@@ -546,14 +750,14 @@ def build():
         "    pc.transform(ref_from_car @ car_from_global @ global_from_car @ car_from_current)\n"
         "    time = (ref_time - sd_time) * ones(N)    # per-point time channel\n"
         "    points = concat(points, [pc.xyz, intensity, time])",
-        caption="fsd/centerpoint_export.py — _aggregate_sweeps. Effect on scene 0: ~25k -> "
+        caption="fsd/centerpoint_export.py - _aggregate_sweeps. Effect on scene 0: ~25k -> "
                 "~270k pts/frame, fewer false positives, predictions sit tightly on GT.")
     d.para("CenterPoint's boxes come out in the LiDAR sensor frame; the exporter converts each "
            "center and yaw to the ego frame with the LiDAR extrinsic and writes "
            "{samples: {sample_token: [{center_ego, yaw, size, detection_name, "
            "detection_score}]}} for the visualizer.")
 
-    d.h2("6.3  Frustum-fusion detector — camera detects, LiDAR ranges")
+    d.h2("6.3  Frustum-fusion detector - camera detects, LiDAR ranges")
     d.para("A second, label-free detector runs entirely on the main environment. Cameras "
            "answer *what and where in the image* (YOLO 2D boxes + COCO class); LiDAR answers "
            "*how far and how big*. It is 'frustum' detection without a learned 3D head: the 2D "
@@ -569,7 +773,7 @@ def build():
                r"\mathrm{keep}\;\; r_i \leq \mathrm{P}_{15}(r) + \mathrm{band}")
     d.bullet("Position = cluster XY mean; the box is rested on the ground plane at z = h/2 "
              "from a class size prior.")
-    d.bullet("Heading from the cluster's dominant horizontal axis via PCA — the eigenvector of "
+    d.bullet("Heading from the cluster's dominant horizontal axis via PCA - the eigenvector of "
              "the 2x2 scatter matrix with the largest eigenvalue (radial fallback for tiny "
              "clusters):")
     d.equation(r"C = X^{\top}X,\quad C\,\mathbf{e}_k = \lambda_k \mathbf{e}_k,\quad"
@@ -577,7 +781,7 @@ def build():
     d.para("Finally, objects seen by two overlapping cameras are de-duplicated greedily by "
            "class and centre distance (highest score wins). Honest limits: positions are as "
            "good as the LiDAR cluster (solid), but class is YOLO/COCO only, size is a prior "
-           "not a measurement, and heading from a partial-view cluster is rough — good enough "
+           "not a measurement, and heading from a partial-view cluster is rough - good enough "
            "to feed tracking and velocity next.")
 
     # ===================================================================== 7
@@ -590,26 +794,26 @@ def build():
     d.para("Each camera image is encoded (EfficientNet-B0 trunk) into, per downsampled pixel, "
            "a categorical **depth distribution** over D discrete depth bins (softmax) and a "
            "C-dim context feature. The outer product of the two 'lifts' the 2D feature into a "
-           "frustum of 3D features — feature times depth-probability at every (pixel, depth):")
+           "frustum of 3D features - feature times depth-probability at every (pixel, depth):")
     d.equation(r"\alpha \in \Delta^{D-1}\ (\text{softmax depth}),\qquad"
                r"\mathbf{c}_{d} = \alpha_d \,\mathbf{f}\ \in \mathbb{R}^{C}")
     d.code(
         "x = self.depthnet(features)                       # D + C channels\n"
         "depth = x[:, :D].softmax(dim=1)                   # depth distribution\n"
         "new_x = depth.unsqueeze(1) * x[:, D:D+C].unsqueeze(2)   # outer product -> (C, D, ...)",
-        caption="fsd/lss.py — CamEncode.get_depth_feat.")
+        caption="fsd/lss.py - CamEncode.get_depth_feat.")
     d.h3("Splat")
     d.para("Each frustum point is placed in 3D using the camera intrinsic and extrinsic "
            "(`get_geometry`), then dropped into a fixed BEV voxel grid. Many frustum points "
            "fall in the same voxel, so features are **sum-pooled** per voxel. The efficiency "
            "trick: sort points by voxel rank and use a cumulative-sum so each voxel's total is "
-           "one subtraction of cumsum endpoints — the autograd-friendly `QuickCumsum`.")
+           "one subtraction of cumsum endpoints - the autograd-friendly `QuickCumsum`.")
     d.code(
         "ranks = geom[:,0]*(nx1*nx2*B) + geom[:,1]*(nx2*B) + geom[:,2]*B + geom[:,3]\n"
         "x, geom, ranks = sort_by(ranks)\n"
         "x, geom = QuickCumsum.apply(x, geom, ranks)   # sum features sharing a voxel\n"
         "final[geom...] = x                            # scatter into BEV grid",
-        caption="fsd/lss.py — voxel_pooling.")
+        caption="fsd/lss.py - voxel_pooling.")
     d.h3("Shoot (not in the port)")
     d.para("The released LSS code ships only the lift+splat vehicle-seg head. The cost-map / "
            "template-trajectory 'shoot' stage from the paper is not in the open-source repo, "
@@ -627,15 +831,15 @@ def build():
            "boxes). It is the handoff point between perception and planning.")
     d.h3("Collision grid = occupancy OR height")
     d.para("The single most planning-relevant derived layer fuses the occupancy probability "
-           "with the height tensor. A cell is blocked if it is probably occupied **or** tall — "
+           "with the height tensor. A cell is blocked if it is probably occupied **or** tall - "
            "the height channel catches obstacles the occupancy filter has not yet committed "
            "to, and vice versa:")
     d.equation(r"\mathrm{blocked}(c) = \left[p(c) \geq \tau_p\right]\;\vee\;"
                r"\left[h_{\mathrm{rng}}(c) \geq \tau_h\right]")
     d.code(
         "blocked = (occupancy_probability >= 0.62) | (height_range >= 0.45)",
-        caption="fsd/motion_planning/occupancy.py — build_collision_grid (tau_p=0.62, tau_h=0.45 m).")
-    d.para("The objects are still recomputed each frame — they are an *overlay*, not yet part "
+        caption="fsd/motion_planning/occupancy.py - build_collision_grid (tau_p=0.62, tau_h=0.45 m).")
+    d.para("The objects are still recomputed each frame - they are an *overlay*, not yet part "
            "of the model's memory (no track id, velocity, or history). Closing that gap "
            "(tracking -> velocity -> short-horizon prediction) is the next milestone.")
 
@@ -643,7 +847,7 @@ def build():
     d.h1("Classical Local Planner", num=9)
     d.para("The planner is deliberately classical and debuggable: estimate ego state, sample a "
            "lattice of timed trajectories, reject colliding ones against the collision grid, "
-           "score the survivors, and pick the cheapest — with an emergency stop as fallback.")
+           "score the survivors, and pick the cheapest - with an emergency stop as fallback.")
 
     d.h2("9.1  Ego state from poses")
     d.para("Speed and yaw-rate are finite-differenced from consecutive ego poses (first frame "
@@ -664,6 +868,11 @@ def build():
     d.para("with the straight-line limit (x' = x + d cos psi, y' = y + d sin psi) used when "
            "|kappa| is ~0 to avoid dividing by zero.")
 
+    d.image_block(diagram_lattice(), width_frac=0.6,
+                  caption="Figure 4. The timed lattice. Constant-curvature arcs fan out from the ego; "
+                          "arcs whose swept disc hits a blocked cell are rejected (red), and the "
+                          "lowest-cost survivor is selected (green).")
+
     d.h2("9.3  Collision validation")
     d.para("Every trajectory point is checked as a **disc** of radius 1.25 m against the "
            "collision grid, and consecutive points are sub-sampled finely enough that the disc "
@@ -676,7 +885,7 @@ def build():
         "    p = lerp(start, end, step/steps)\n"
         "    if collision_grid.footprint_blocked(p.x, p.y, radius): return COLLISION\n"
         "# footprint_blocked: any blocked cell whose closest point is within radius",
-        caption="fsd/motion_planning/validator.py — swept-disc collision check.")
+        caption="fsd/motion_planning/validator.py - swept-disc collision check.")
 
     d.h2("9.4  Cost and selection")
     d.para("Valid trajectories are scored by a weighted sum that rewards progress and "
@@ -688,7 +897,7 @@ def build():
            "valid trajectory is selected. If **no** candidate is collision-free, the planner "
            "returns a decelerating emergency stop (straight-ahead, ramping speed to zero) and "
            "flags whether even that is collision-free. The `OfflinePlanningRuntime` ties it "
-           "together per frame — occupancy + height -> collision grid, ego state, plan — and "
+           "together per frame - occupancy + height -> collision grid, ego state, plan - and "
            "resets its temporal state at every scene boundary.")
     d.code(
         "occupancy   = mapper.step(lidar)                     # temporal log-odds\n"
@@ -697,7 +906,7 @@ def build():
         "ego         = estimate_ego_state(pose, t, prev_pose, prev_t)\n"
         "world       = PlannerWorld(ego, collision.blocked, occupancy, ...)\n"
         "result      = planner.plan(world)                    # sample -> validate -> score",
-        caption="fsd/motion_planning/runner.py — OfflinePlanningRuntime.step.")
+        caption="fsd/motion_planning/runner.py - OfflinePlanningRuntime.step.")
 
     # ===================================================================== 10
     d.h1("Status and Next Steps", num=10)
@@ -711,10 +920,10 @@ def build():
              "cost ranking, and an emergency-stop fallback.")
     d.para("The clear gap is **time-aware dynamic objects**. The model sees the present: it "
            "can say 'there is a car here', but not 'that car is moving at 6 m/s and will cross "
-           "the ego path in 2 s'. The next milestone gives objects identity and motion — "
+           "the ego path in 2 s'. The next milestone gives objects identity and motion - "
            "finite-difference velocity (GT instance tokens first as an oracle, then "
            "association over CenterPoint predictions), constant-velocity short-horizon "
-           "prediction, and object-aware collision risk — after which the planner can reason "
+           "prediction, and object-aware collision risk - after which the planner can reason "
            "about other agents, not just static free space.")
 
     d.output(str(OUT))
