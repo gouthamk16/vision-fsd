@@ -4,7 +4,7 @@ import numpy as np
 
 from fsd.data import CameraFrame, SurroundFrame
 from fsd.object_detection import Box3D, box_bottom_corners_ego
-from fsd.tracking import GtVelocityTracker
+from fsd.tracking import GtVelocityTracker, PredictionVelocityTracker
 
 
 def _frame(ego_translation, ego_rotation, timestamp_us):
@@ -13,13 +13,13 @@ def _frame(ego_translation, ego_rotation, timestamp_us):
     return SurroundFrame("scene", "scene-x", "sample", 0, timestamp_us, {"CAM_FRONT": cam})
 
 
-def _box(center_ego, token):
+def _box(center_ego, token, class_name="car"):
     center_ego = np.asarray(center_ego, dtype=np.float64)
     size = np.array([1.9, 4.6, 1.7])
     return Box3D(
         sample_token="s",
         annotation_token="a",
-        class_name="car",
+        class_name=class_name,
         raw_category="vehicle.car",
         center_ego=center_ego,
         size=size,
@@ -71,3 +71,42 @@ def test_reset_clears_history():
     tracker.reset()
     out = tracker.update(_frame([0.0, 0.0, 0.0], identity, 500_000), [_box([22.5, 0.0, 0.0], "obj")])
     assert out[0].speed_mps == 0.0  # no carry-over across reset
+
+
+# --- PredictionVelocityTracker (identity-free, greedy nearest-by-class) -------
+
+IDENTITY = [1.0, 0.0, 0.0, 0.0]
+
+
+def test_prediction_association_recovers_velocity():
+    # Two cars; instance_token is ignored, association is by nearest global centre.
+    tracker = PredictionVelocityTracker()
+    tracker.update(
+        _frame([0.0, 0.0, 0.0], IDENTITY, 0),
+        [_box([20.0, 2.0, 0.0], ""), _box([10.0, -3.0, 0.0], "")],
+    )
+    out = tracker.update(
+        _frame([0.0, 0.0, 0.0], IDENTITY, 500_000),
+        [_box([22.5, 2.0, 0.0], ""), _box([10.5, -3.0, 0.0], "")],
+    )
+    speeds = sorted(o.speed_mps for o in out)
+    assert speeds[0] == 1.0   # 0.5 m over 0.5 s
+    assert abs(speeds[1] - 5.0) < 1e-6  # 2.5 m over 0.5 s
+
+
+def test_prediction_gate_rejects_teleport():
+    # A jump larger than the gate is treated as a new track, not a fast match.
+    tracker = PredictionVelocityTracker(gate_m=5.0)
+    tracker.update(_frame([0.0, 0.0, 0.0], IDENTITY, 0), [_box([20.0, 0.0, 0.0], "")])
+    out = tracker.update(_frame([0.0, 0.0, 0.0], IDENTITY, 500_000), [_box([40.0, 0.0, 0.0], "")])
+    assert out[0].speed_mps == 0.0  # 20 m jump > 5 m gate -> new track
+
+
+def test_prediction_class_must_match():
+    tracker = PredictionVelocityTracker()
+    tracker.update(_frame([0.0, 0.0, 0.0], IDENTITY, 0), [_box([20.0, 0.0, 0.0], "", class_name="car")])
+    out = tracker.update(
+        _frame([0.0, 0.0, 0.0], IDENTITY, 500_000),
+        [_box([21.0, 0.0, 0.0], "", class_name="truck")],
+    )
+    assert out[0].speed_mps == 0.0  # different class -> no match despite proximity

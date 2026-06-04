@@ -18,7 +18,7 @@ from fsd.object_detection import (
     ego_xy_to_bev_pixels,
 )
 from fsd.occupancy import TemporalOccupancyMapper, render_occupancy_bev
-from fsd.tracking import GtVelocityTracker, TrackedObject
+from fsd.tracking import GtVelocityTracker, PredictionVelocityTracker, TrackedObject
 
 
 @dataclass(frozen=True)
@@ -73,12 +73,14 @@ class WorldModelBuilder:
             resolution=self.config.resolution,
         )
         self.gt_tracker = GtVelocityTracker()
+        self.pred_tracker = PredictionVelocityTracker()
         self._previous_pose = None
         self._previous_timestamp_us = None
 
     def reset(self) -> None:
         self.mapper.reset()
         self.gt_tracker.reset()
+        self.pred_tracker.reset()
         self._previous_pose = None
         self._previous_timestamp_us = None
 
@@ -115,6 +117,7 @@ class WorldModelBuilder:
         pred_boxes = []
         if self.prediction_loader is not None:
             pred_boxes = self.prediction_loader.boxes_for_frame(frame, self.config.score_threshold)
+        pred_tracked = self.pred_tracker.update(frame, pred_boxes)
 
         return BevWorldModel(
             frame=frame,
@@ -123,7 +126,7 @@ class WorldModelBuilder:
             height_tensor=tensor,
             collision_grid=collision.blocked,
             gt_objects=[_tracked_world_object(t) for t in gt_tracked],
-            pred_objects=[_world_object(box) for box in pred_boxes],
+            pred_objects=[_tracked_world_object(t) for t in pred_tracked],
             x_range=self.config.x_range,
             y_range=self.config.y_range,
             resolution=self.config.resolution,
@@ -158,6 +161,7 @@ def _draw_object_motion(
     y_range: tuple[float, float],
     resolution: float,
     scale: int,
+    color: tuple[int, int, int] = (40, 220, 255),
     min_speed_mps: float = 0.5,
 ) -> int:
     """Overlay velocity arrows and a faded future ghost footprint. Returns moving count."""
@@ -171,15 +175,15 @@ def _draw_object_motion(
         arrow = ego_xy_to_bev_pixels(
             np.stack([center_xy, tip_xy]), x_range, y_range, resolution, scale=scale
         )
-        cv2.arrowedLine(image, tuple(arrow[0]), tuple(arrow[1]), (40, 220, 255), 2, tipLength=0.3, line_type=cv2.LINE_AA)
+        cv2.arrowedLine(image, tuple(arrow[0]), tuple(arrow[1]), color, 2, tipLength=0.3, line_type=cv2.LINE_AA)
 
         if obj.future_xy_ego is not None and len(obj.future_xy_ego):
             ghost = obj.footprint_ego + (obj.future_xy_ego[-1] - center_xy)
             gp = ego_xy_to_bev_pixels(ghost, x_range, y_range, resolution, scale=scale)
-            cv2.polylines(image, [gp.reshape((-1, 1, 2))], True, (60, 180, 230), 1, cv2.LINE_AA)
+            cv2.polylines(image, [gp.reshape((-1, 1, 2))], True, color, 1, cv2.LINE_AA)
 
         label = f"{obj.speed_mps:.1f}m/s"
-        cv2.putText(image, label, (int(arrow[1][0]) + 3, int(arrow[1][1])), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (40, 220, 255), 1, cv2.LINE_AA)
+        cv2.putText(image, label, (int(arrow[1][0]) + 3, int(arrow[1][1])), cv2.FONT_HERSHEY_SIMPLEX, 0.36, color, 1, cv2.LINE_AA)
     return moving
 
 
@@ -213,18 +217,18 @@ def render_world_model_bev(model: BevWorldModel, scale: int = 2) -> np.ndarray:
         title="Pred objects",
         label_scores=True,
     )
-    moving = _draw_object_motion(
-        image,
-        model.gt_objects,
-        x_range=model.x_range,
-        y_range=model.y_range,
-        resolution=model.resolution,
-        scale=scale,
+    moving_gt = _draw_object_motion(
+        image, model.gt_objects, x_range=model.x_range, y_range=model.y_range,
+        resolution=model.resolution, scale=scale, color=(40, 220, 255),
+    )
+    moving_pred = _draw_object_motion(
+        image, model.pred_objects, x_range=model.x_range, y_range=model.y_range,
+        resolution=model.resolution, scale=scale, color=(0, 165, 255),
     )
     blocked = int(model.collision_grid.sum())
     text = (
-        f"world model | speed={model.ego.speed_mps:.1f}m/s | "
-        f"blocked={blocked} | gt={len(model.gt_objects)} | moving={moving} | pred={len(model.pred_objects)}"
+        f"world model | speed={model.ego.speed_mps:.1f}m/s | blocked={blocked} | "
+        f"gt={len(model.gt_objects)}(mv {moving_gt}) | pred={len(model.pred_objects)}(mv {moving_pred})"
     )
     cv2.rectangle(image, (0, 0), (image.shape[1], 58 * scale), (18, 18, 18), -1)
     cv2.putText(image, text, (10, 25 * scale), cv2.FONT_HERSHEY_SIMPLEX, 0.55 * scale, (245, 245, 245), 1, cv2.LINE_AA)
