@@ -70,7 +70,7 @@ nuScenes is organised as ~850 independent 20-second driving clips (called scenes
 | `planner_bev` | Offline LiDAR BEV planner: candidate trajectories, selected path, and collision context |
 | `planner_camera` | Front-camera overlay with selected path projected onto video and a compact BEV panel |
 | `height_bev` | 2.5D BEV tensor - per-cell point density and min/max/mean/range height channels |
-| `world_bev` | Unified BEV world model: occupancy, height/collision context, ego state, and object footprints |
+| `world_bev` | Unified BEV world model: occupancy, height/collision context, ego state, object footprints, and per-object velocity arrows + predicted motion |
 | `all` | All views rendered simultaneously |
 
 ### Camera-only BEV with Lift-Splat-Shoot
@@ -87,7 +87,11 @@ The plain BEV only knows "cell has points or not." The height tensor keeps the v
 
 ### Unified BEV world model
 
-The world model combines the separate BEV layers into one state object: temporal occupancy probability, 2.5D LiDAR height channels, collision cells, ego speed/state, and object footprints from GT boxes or detector predictions. This is the handoff point for later tracking, prediction, and planning. Implementation in [fsd/world_model.py](fsd/world_model.py).
+The world model combines the separate BEV layers into one state object: temporal occupancy probability, 2.5D LiDAR height channels, collision cells, ego speed/state, and object footprints from GT boxes or detector predictions. This is the handoff point between perception and planning. Implementation in [fsd/world_model.py](fsd/world_model.py).
+
+### Object velocity + short-horizon prediction
+
+Until now the world model only saw the present - "there is a car here". This layer gives objects motion: "that car is moving at 7 m/s and will be here in 2 s". We start with a ground-truth oracle because nuScenes annotations carry a stable `instance_token`, so matching the same object across keyframes is free and association error is zero - the right baseline to validate a learned tracker against later. For each object we recover its global position, finite-difference it across consecutive keyframes for true ground velocity, rotate that velocity into the current ego frame, and extrapolate at constant velocity to 1/2/3 s horizons. The `world_bev` view draws a cyan velocity arrow (1 s lookahead, so arrow length equals speed in metres), a faded future ghost footprint, and a per-object speed label. Verified on scene 0: the first keyframe shows zero velocity (no prior), and subsequent frames recover realistic 5-8 m/s vehicle speeds. Implementation in [fsd/tracking.py](fsd/tracking.py). Next: swap the `instance_token` oracle for greedy nearest-by-class association over CenterPoint predictions.
 
 ### Results
 
@@ -119,7 +123,7 @@ The world model combines the separate BEV layers into one state object: temporal
     </td>
     <td width="50%" align="center">
       <img src="results/nuscenes_world_bev.jpg" width="100%"><br>
-      <sub>Unified BEV world model - occupancy, collision context, ego state, and object footprints</sub>
+      <sub>Unified BEV world model - occupancy, collision context, ego state, object footprints, and per-object velocity (cyan arrows + m/s labels)</sub>
     </td>
   </tr>
   <tr>

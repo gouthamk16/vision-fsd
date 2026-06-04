@@ -63,6 +63,7 @@ class Box3D:
     num_radar_pts: int
     score: float | None = None
     source: str = "gt"
+    instance_token: str = ""
 
 
 class NuScenesAnnotationLoader:
@@ -181,6 +182,7 @@ def annotation_to_ego_box(
         corners_ego=corners_ego,
         num_lidar_pts=int(annotation.get("num_lidar_pts", 0)),
         num_radar_pts=int(annotation.get("num_radar_pts", 0)),
+        instance_token=annotation.get("instance_token", ""),
     )
 
 
