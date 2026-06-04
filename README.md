@@ -141,6 +141,12 @@ When we check the real way against the answer key on scene 0, the speeds agree t
       <sub>2.5D BEV tensor - per-cell point density and min/max/mean/range height channels (one panel each)</sub>
     </td>
   </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <img src="results/nuscenes_object_velocity.jpg" width="100%"><br>
+      <sub>Object velocity - each moving vehicle gets an arrow (direction, length = speed) and a speed tag, with a faint outline of where it will be ~3 s ahead. Orange = velocity from tracked CenterPoint detections.</sub>
+    </td>
+  </tr>
 </table>
 
 ### Run
