@@ -91,14 +91,16 @@ The world model combines the separate BEV layers into one state object: temporal
 
 ### Object velocity + short-horizon prediction
 
-Until now the world model only saw the present - "there is a car here". This layer gives objects motion: "that car is moving at 7 m/s and will be here in 2 s". For each object we recover its global position, finite-difference it across consecutive keyframes for true ground velocity, rotate that velocity into the current ego frame, and extrapolate at constant velocity to 1/2/3 s horizons. The `world_bev` view draws a velocity arrow (1 s lookahead, so arrow length equals speed in metres), a faded future ghost footprint, and a per-object speed label.
+Up to here the world model only knew *where* other cars and people were - a frozen snapshot. This layer adds **how fast each one is moving, which way, and where it will be in the next few seconds**.
 
-Two trackers share that math and differ only in how they match an object to its previous-frame self:
+The idea is simple: look at the same object in two snapshots taken half a second apart, measure how far it moved, and divide by the time. That gives its speed and direction. To guess the future, we assume it keeps going the same way (so its position in 1, 2, and 3 seconds is just current position + speed x time).
 
-- **GT oracle** (`GtVelocityTracker`) - matches by the stable nuScenes `instance_token`, so association error is zero. Drawn in cyan. The baseline.
-- **Detector tracker** (`PredictionVelocityTracker`) - greedy nearest-by-class association in the global frame, for CenterPoint boxes that carry no identity. Drawn in orange.
+The only hard part is knowing which object in this frame is the *same* object from the last frame. We do it two ways:
 
-On scene 0 the detector tracker's velocities land within **0.27 m/s mean (0.25 median)** of the GT oracle across matched moving objects, with **0.18 m/s** mean speed error - i.e. real-detector tracking recovers velocity nearly as well as the labelled baseline. Pass `--predictions` to overlay it. Implementation in [fsd/tracking.py](fsd/tracking.py).
+- **The answer-key way** (`GtVelocityTracker`): the nuScenes dataset labels every object with a permanent ID, so the match is perfect. This is our gold standard. Drawn in cyan.
+- **The real way** (`PredictionVelocityTracker`): our CenterPoint detector gives no IDs, so we match each object to the nearest object of the same type (car, truck, ...) in the previous frame. Drawn in orange.
+
+When we check the real way against the answer key on scene 0, the speeds agree to within about **0.25 m/s** - basically identical - so tracking real detections works nearly as well as the labelled baseline. In the `world_bev` view each moving object gets an arrow (where it is heading), a faint outline (where it will be in 3 seconds), and a speed tag like `5.2 m/s`. Pass `--predictions` to also show the detector's version. Implementation in [fsd/tracking.py](fsd/tracking.py).
 
 ### Results
 
