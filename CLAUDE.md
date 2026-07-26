@@ -59,11 +59,18 @@ bev_tensor.py        2.5D variant: per-cell density + min/max/mean/range height
   |
 occupancy.py         temporal log-odds fusion across keyframes (stateful)
   |
-world_model.py       unified state: occupancy + height + ego + object
-  |                  footprints + per-object velocity (tracking.py)
+motion_planning/     ego_motion / occupancy / state provide the ego-state and
+  |                  collision-grid primitives, and the planner itself samples
+  |                  trajectories. Does NOT import world_model.
   |
-motion_planning/     consumer: samples trajectories against that world
+world_model.py       top of the chain: fuses occupancy + height + ego state +
+                     object footprints + per-object velocity (tracking.py).
+                     Imports from motion_planning, not the reverse.
 ```
+
+Note the direction: `motion_planning/` is a dependency of `world_model.py`, not
+a consumer of it. Both are read by `visualize.py`, which is what actually wires
+the planner views and the world-model view together.
 
 Sitting outside that chain: `lss.py` (camera-only BEV via Lift-Splat-Shoot),
 `nuscenes_map.py` (HD map background), `fusion_detect.py` (camera+LiDAR
