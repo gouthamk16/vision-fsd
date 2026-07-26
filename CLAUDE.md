@@ -1,59 +1,127 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## Project Overview
 
-Vision-based Full Self-Driving pipeline that processes dashcam video through three parallel subsystems — object detection/tracking, monocular depth estimation, and visual odometry — then fuses their outputs into an annotated video with a bird's-eye-view (BEV) minimap.
+Research stack for vision-based autonomous driving. Two independent pipelines
+live here — do not confuse them:
 
-## Environment Setup
+| | `fsd/` | `monocular_vision/` |
+|---|---|---|
+| Input | nuScenes: 6 surround cameras + LiDAR | single dashcam video file |
+| Entry point | `python -m fsd.visualize` | `python main.py <video>` |
+| Status | active | legacy, maintained but not extended |
 
-Requires Python 3.12, CUDA 12.8, and an activated `.venv`:
+New work goes in `fsd/`. `monocular_vision/` is kept because it runs and the
+depth/segmentation results are still cited in the README, not because it is
+being developed.
+
+## Environment
+
+Python 3.12, CUDA 12.8, an activated `.venv`:
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate  # Windows
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+.venv\Scripts\activate
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```
 
-DepthAnything V2 weights are auto-downloaded from HuggingFace on first run. YOLO weights (`yolo26n.pt`) must be present at the repo root.
+`fsd/centerpoint_export.py` is the one exception: it needs mmdet3d +
+nuscenes-devkit against torch 2.1/cu121, which conflicts with the pins above,
+so it runs in a separate `.venv-mmdet3d`. It is not covered by
+`requirements.txt` and cannot be imported from the main env.
 
-## Running
+nuScenes data is read from `D:/nuscenes`, override with `NUSCENES_ROOT`.
 
-```bash
-# Stream to screen (press 'q' to exit)
-python main.py data/your_video.mp4 --stream
+Weights: `yolo26n.pt` must be at the repo root. DepthAnything V2 and YOLOPv2
+download themselves on first run. The Lift-Splat-Shoot checkpoint is manual —
+see the README table — and is passed via `--lss-weights`.
 
-# Save annotated output to outputs/
-python main.py data/your_video.mp4 --save
+## Architecture — `fsd/` (nuScenes)
 
-# Quick test on first N frames
-python main.py data/your_video.mp4 --stream --frames 300
+`fsd/visualize.py` is the single entry point. Every other module in the
+package is a library; none of them have their own CLI, by design. Adding a
+capability means adding a view to `visualize.py`, not a new `__main__`.
+
+The dependency order is the thing worth knowing, since it is not obvious from
+filenames and most modules sit in the middle of it:
+
+```
+data.py              nuScenes loader: scenes, samples, calibration, ego pose
+  |
+lidar_projection.py  geometry primitives (transform_points,
+  |                  quaternion_to_rotation_matrix). Reused by ~8 modules.
+  |
+bev.py               rasterize a LiDAR sweep to an ego-frame BEV image
+bev_tensor.py        2.5D variant: per-cell density + min/max/mean/range height
+  |
+occupancy.py         temporal log-odds fusion across keyframes (stateful)
+  |
+world_model.py       unified state: occupancy + height + ego + object
+  |                  footprints + per-object velocity (tracking.py)
+  |
+motion_planning/     consumer: samples trajectories against that world
 ```
 
-Outputs land in `outputs/` (annotated video + depth video) and `logs/`. Log verbosity is controlled by the `LOGGING_LEVEL` env var (default: INFO).
+Sitting outside that chain: `lss.py` (camera-only BEV via Lift-Splat-Shoot),
+`nuscenes_map.py` (HD map background), `fusion_detect.py` (camera+LiDAR
+frustum fusion), `object_detection.py` (GT/prediction box loading + drawing),
+`contact_sheet.py` (six-camera tiling).
 
-## Architecture
+Views: `cameras`, `lidar`, `bev`, `lss_bev`, `lss_lidar_bev`, `occupancy_bev`,
+`height_bev`, `objects_bev`, `objects_cameras`, `planner_bev`,
+`planner_camera`, `world_bev`, `all`.
 
-**Entry point**: `main.py` → `fsd/fsd.py` → `fsd/process_frame.py`
+## Architecture — `monocular_vision/` (legacy)
 
-`fsd.py` handles video I/O and frame resampling (>45 FPS input is resampled to 20 FPS target). Each frame is passed to `FrameProcessor.process()`.
+`main.py` → `fsd.driver()` → `FrameProcessor.process()` per frame. The driver
+handles video I/O and resamples input above 45 FPS down to a 20 FPS target.
 
-**Three subsystems run per frame inside `FrameProcessor`:**
+Four subsystems run per frame inside `FrameProcessor`:
 
-| Module | Class | Responsibility |
+| Module | Class | Output |
 |---|---|---|
-| `vision.py` | `VisualOdometry` | SIFT → FLANN → Essential matrix pose recovery; outputs camera trajectory |
-| `detect.py` | `VehicleTracker` | YOLOv2.6 + ByteTrack; outputs 2D bboxes and track IDs |
-| `depth.py` | `MonocularDepthEstimator` | DepthAnything V2 metric outdoor; outputs per-pixel depth in meters |
+| `detect.py` | `VehicleTracker` | YOLO + ByteTrack 2D boxes, track IDs, class locked per track |
+| `depth.py` | `MonocularDepthEstimator` | DepthAnything V2 metric depth, metres |
+| `segment.py` | `DrivableAreaSegmentor` | YOLOPv2 binary drivable-area mask |
+| `vision.py` | `VisualOdometry` | SIFT → FLANN → essential matrix pose |
 
-**BEV rendering** (`detect.py`): Projects 2D bboxes + per-object depth into 3D world coordinates. Renders a 320×440 px minimap covering ~83 m forward and ±32 m lateral. Class-specific depth extents are hardcoded priors (Car=1.8 m, Truck=12 m, Bus=2.2 m, Bicycle/Motorcycle=0.4–4.5 m).
+BEV rendering in `detect.py` projects 2D boxes plus per-object depth into a
+320×440 minimap covering ~83 m forward and ±32 m lateral. Per-class depth
+extents are hardcoded priors (Car 1.8 m, Truck 12 m, Bus 2.2 m,
+Bicycle/Motorcycle 0.4–4.5 m). Tracked COCO classes: Bicycle(1), Car(2),
+Motorcycle(3), Bus(5), Truck(7).
 
-**Tracked vehicle classes** (COCO IDs): Bicycle(1), Car(2), Motorcycle(3), Bus(5), Truck(7).
+Outputs land in `outputs/`, logs in `logs/`. `LOGGING_LEVEL` controls
+verbosity (default INFO).
 
-`enhance.py` contains low-light image decomposition — partially implemented, not yet integrated into the main pipeline.
+## Tests
 
-## No Tests or Linter
+`pytest tests/` — 51 tests, mostly covering `motion_planning/` and
+`tracking.py`. There is no linter or CI configured.
 
-There is no test suite or linting config. Validate changes by running the pipeline on a short clip with `--frames 300`.
+Tests are pure-Python and need neither a GPU nor the nuScenes dataset. Changes
+touching rendering or the pipelines should additionally be validated by
+actually running them:
+
+```bash
+python -m fsd.visualize --view world_bev --frames 5 --save
+python main.py data/test_nyc.mp4 --stream --frames 60
+```
+
+## Code standards
+
+- Simplest correct solution over the extensible one. A function earns its
+  existence by being reused or by making the code clearer.
+- Files under ~300 lines, functions under ~30. `object_detection.py` and
+  `visualize.py` are over and known to be; don't grow them further.
+- No comments restating what the code does. Comment the non-obvious only: why
+  a threshold is that value, a workaround for a library bug, an invariant not
+  visible locally.
+- No throwaway scripts committed. No model weights, video, or large binaries —
+  they are gitignored; document how to fetch them instead.
+- Conventional commits (`feat:`, `fix:`, `refactor:`, `chore:`, `docs:`), one
+  logical change each.
+- Never claim what code does without reading it.
