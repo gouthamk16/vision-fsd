@@ -1,5 +1,6 @@
 """Run pretrained CenterPoint (mmdet3d) on nuScenes LiDAR and export ego-frame
-3D boxes as prediction JSON for the visualizer's pred_bev / compare_bev views.
+3D boxes as prediction JSON, consumed by the visualizer's world_bev view via
+`--predictions`.
 
 Runs ONLY in the isolated mmdet3d environment (.venv-mmdet3d): torch 2.1 +
 mmcv/mmdet/mmdet3d + spconv + nuscenes-devkit. The main .venv cannot import it.
