@@ -1,4 +1,3 @@
-import os
 from dotenv import load_dotenv
 import time
 from monocular_vision.logging_utils import get_logger

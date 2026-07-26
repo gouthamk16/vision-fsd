@@ -39,7 +39,7 @@ class VehicleTracker:
         max_detections=100,
         end_to_end=True,
         enable_tracking=True,
-        tracker_config="fsd/bytetrack_vehicle.yaml",
+        tracker_config="monocular_vision/bytetrack_vehicle.yaml",
         max_track_misses=6,
     ):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"

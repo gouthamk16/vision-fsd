@@ -1,6 +1,6 @@
 import argparse
 
-from fsd import fsd
+from monocular_vision import fsd
 
 
 def parse_args():
@@ -32,7 +32,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output",
-        default="output",
+        default=None,
         help="Output path for --save mode. Defaults to outputs/<video>_processed_<timestamp>.mp4.",
     )
     parser.add_argument(
@@ -47,8 +47,6 @@ def parse_args():
 def main():
     args = parse_args()
     mode = "save" if args.save else "stream"
-    # create a folder called "output"
-    
     fsd.driver(
         args.video_path,
         mode=mode,
