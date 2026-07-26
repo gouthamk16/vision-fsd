@@ -15,15 +15,13 @@ Channels (per cell):
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
-from pathlib import Path
 
 import cv2
 import numpy as np
 
 from fsd.bev import lidar_points_to_ego
-from fsd.data import LidarFrame, NuScenesSceneLoader, SurroundFrame
+from fsd.data import LidarFrame, SurroundFrame
 from fsd.lidar_projection import load_lidar_points
 
 
@@ -165,80 +163,3 @@ def render_bev_channels(
     top = np.hstack(panels[:3])
     bottom = np.hstack(panels[3:])
     return np.vstack([top, bottom])
-
-
-def save_bev_tensor_sequence(
-    dataroot: str | Path | None = None,
-    scene_index: int = 0,
-    scene_name: str | None = None,
-    start_sample_index: int = 0,
-    max_frames: int | None = 40,
-    output_path: str | Path = "outputs/nuscenes_bev_tensor_scene0_40f.mp4",
-    fps: float = 2.0,
-    resolution: float = 0.25,
-    z_range: tuple[float, float] = (-3.0, 5.0),
-) -> Path:
-    loader = NuScenesSceneLoader(dataroot=dataroot)
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    writer = None
-    rendered = 0
-    try:
-        for frame, lidar in loader.iter_scene_frames(
-            scene_index=scene_index,
-            start_sample_index=start_sample_index,
-            max_frames=max_frames,
-            scene_name=scene_name,
-            include_lidar=True,
-        ):
-            if lidar is None:
-                raise RuntimeError("LiDAR frame was not loaded")
-            tensor = bev_tensor_from_lidar(lidar, resolution=resolution, z_range=z_range)
-            image = render_bev_channels(frame, tensor, z_range=z_range)
-            rendered += 1
-            if writer is None:
-                height, width = image.shape[:2]
-                writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
-                if not writer.isOpened():
-                    raise OSError(f"Could not open video writer: {output}")
-            writer.write(image)
-    finally:
-        if writer is not None:
-            writer.release()
-
-    if rendered == 0:
-        raise RuntimeError("No BEV tensor frames were rendered")
-    return output
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render 2.5D LiDAR BEV height-channel inspection videos.")
-    parser.add_argument("--dataroot", default=None, help="nuScenes root. Defaults to NUSCENES_ROOT or D:/nuscenes.")
-    parser.add_argument("--scene-index", type=int, default=0, help="Scene index to render.")
-    parser.add_argument("--scene-name", default=None, help="Scene name to render, e.g. scene-0001.")
-    parser.add_argument("--start-sample-index", type=int, default=0, help="First key sample index within the scene.")
-    parser.add_argument("--frames", type=int, default=40, help="Maximum number of key samples to render.")
-    parser.add_argument("--fps", type=float, default=2.0, help="Output video FPS.")
-    parser.add_argument("--resolution", type=float, default=0.25, help="BEV grid meters per cell.")
-    parser.add_argument("--output", default="outputs/nuscenes_bev_tensor_scene0_40f.mp4", help="Output video path.")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    output = save_bev_tensor_sequence(
-        dataroot=args.dataroot,
-        scene_index=args.scene_index,
-        scene_name=args.scene_name,
-        start_sample_index=args.start_sample_index,
-        max_frames=args.frames,
-        output_path=args.output,
-        fps=args.fps,
-        resolution=args.resolution,
-    )
-    print(output)
-
-
-if __name__ == "__main__":
-    main()
