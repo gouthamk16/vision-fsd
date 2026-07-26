@@ -136,6 +136,9 @@ class FrustumFusionDetector:
         depth_band: float = 6.0,
         min_points: int = 6,
     ):
+        # Deferred: importing ultralytics pulls in torch and the YOLO registry,
+        # which would cost every importer of this module even when no detection
+        # view is requested.
         from ultralytics import YOLO
 
         self.model = YOLO(str(weights_path))

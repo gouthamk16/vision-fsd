@@ -41,8 +41,6 @@ CLASS_COLORS = {
     "barrier": (220, 220, 220),
     "traffic_cone": (60, 140, 255),
 }
-GT_COLOR = (80, 240, 80)
-PRED_COLOR = (70, 70, 255)
 CAMERA_GT_COLOR = (60, 255, 60)
 CAMERA_PRED_COLOR = (60, 80, 255)
 

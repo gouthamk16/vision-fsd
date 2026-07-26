@@ -71,7 +71,7 @@ The idea is simple: look at the same object in two snapshots taken half a second
 
 The only hard part is knowing which object in this frame is the *same* object from the last frame. We do it two ways:
 
-- **The answer-key way** (`GtVelocityTracker`): the nuScenes dataset labels every object with a permanent ID, so the match is perfect. This is our gold standard. Drawn in cyan.
+- **The answer-key way** (`GtVelocityTracker`): the nuScenes dataset labels every object with a permanent ID, so the match is perfect. This is our gold standard. Drawn in amber.
 - **The real way** (`PredictionVelocityTracker`): our CenterPoint detector gives no IDs, so we match each object to the nearest object of the same type (car, truck, ...) in the previous frame. Drawn in orange.
 
 When we check the real way against the answer key on scene 0, the speeds agree to within about **0.25 m/s** - basically identical - so tracking real detections works nearly as well as the labelled baseline. In the `world_bev` view each moving object gets an arrow (where it is heading), a faint outline (where it will be in 3 seconds), and a speed tag like `5.2 m/s`. Pass `--predictions` to also show the detector's version. Implementation in [fsd/tracking.py](fsd/tracking.py).
@@ -263,7 +263,7 @@ pytest tests/
 
 | File | Size | Source |
 |---|---|---|
-| `yolo26n.pt` | ~6 MB | Included in repo |
+| `yolo26n.pt` | ~6 MB | Not tracked (`*.pt` is gitignored). Ultralytics fetches it on first use; otherwise place it at the repo root |
 | `yolopv2.pt` | ~70 MB | Auto-downloaded from GitHub releases on first run |
 | DepthAnything V2 (metric outdoor large) | ~335 MB | Auto-downloaded from HuggingFace on first run |
 | Lift-Splat-Shoot BEV vehicle seg (`model525000.pt`) | ~55 MB | Manual: [Google Drive](https://drive.google.com/file/d/1bsUYveW_eOqa4lglryyGQNeC4fyQWvQQ/view?usp=sharing), drop into `models/` and pass via `--lss-weights` |

@@ -52,7 +52,7 @@ filenames and most modules sit in the middle of it:
 data.py              nuScenes loader: scenes, samples, calibration, ego pose
   |
 lidar_projection.py  geometry primitives (transform_points,
-  |                  quaternion_to_rotation_matrix). Reused by ~8 modules.
+  |                  quaternion_to_rotation_matrix). Reused by 12 modules.
   |
 bev.py               rasterize a LiDAR sweep to an ego-frame BEV image
 bev_tensor.py        2.5D variant: per-cell density + min/max/mean/range height
@@ -125,9 +125,9 @@ python main.py data/test_nyc.mp4 --stream --frames 60
 - Files under ~300 lines, functions under ~30. These are the target for new
   and modified code, not a description of the current state: the existing tree
   has 6 files over 300 lines (`build_whitepaper.py` 954, `data.py` 600,
-  `lss.py` 545, `object_detection.py` 532, `visualize.py` 456, `detect.py` 305)
+  `lss.py` 545, `object_detection.py` 530, `visualize.py` 467, `detect.py` 305)
   and 65 functions over 30 lines, the worst being `build()` 500,
-  `run_visualizer()` 236 and `driver()` 161. Don't grow them; split when you
+  `run_visualizer()` 240 and `driver()` 161. Don't grow them; split when you
   have a reason to touch one. A repo-wide refactor to these limits has not
   been done and would need test coverage on the render paths first.
 - No comments restating what the code does. Comment the non-obvious only: why
