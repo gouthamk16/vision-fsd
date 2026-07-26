@@ -126,8 +126,35 @@ python main.py data/test_nyc.mp4 --stream --frames 60
 - No comments restating what the code does. Comment the non-obvious only: why
   a threshold is that value, a workaround for a library bug, an invariant not
   visible locally.
+- Duplicated logic gets extracted at 3+ occurrences. Two usually don't yet.
+- Data crossing a module boundary is a typed structure, not a loose dict. The
+  `@dataclass` types in `fsd/data.py`, `object_detection.Box3D` and
+  `motion_planning/state.py` are the pattern to follow; nuScenes JSON records
+  stay dicts only until they are parsed into one of those.
+- Explicit error handling where the failure is actionable, not a blanket
+  try/except several layers up. `FrameProcessor.__init__` is the right shape —
+  it catches per subsystem so a missing depth model degrades instead of
+  killing the pipeline. The broad `except Exception` around the whole
+  per-frame body in `process_frame.py` is the wrong shape; don't copy it.
+- Imports at module top level. The one accepted exception is a heavy or
+  environment-specific ML import deferred into its function, and only with the
+  reason stated inline: `centerpoint_export.py` (mmdet3d exists only in
+  `.venv-mmdet3d`) and `fusion_detect.py` (`ultralytics` deferred so importing
+  the module doesn't load YOLO).
 - No throwaway scripts committed. No model weights, video, or large binaries —
   they are gitignored; document how to fetch them instead.
+- No stray `TODO` comments. Do it, or write it down outside the code.
+- Match the existing style of a file you're editing even if you'd choose
+  differently. Don't refactor adjacent code that isn't part of the task —
+  every changed line should trace back to the task at hand.
+- No temporary fix for a root cause you understand. If it can't be fixed
+  properly now, say so explicitly rather than papering over it.
+- Turn a task into a verifiable goal before starting, and don't call it done
+  without proving it: run `pytest tests/`, and for render or pipeline changes
+  actually run the thing and show the output.
 - Conventional commits (`feat:`, `fix:`, `refactor:`, `chore:`, `docs:`), one
   logical change each.
 - Never claim what code does without reading it.
+
+There is no linter or CI here. `ruff` and `mypy` are the tools these standards
+assume; until they are wired up, the checks above are manual.
