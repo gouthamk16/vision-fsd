@@ -1,17 +1,25 @@
+# Local tooling
+.claude/
+
+# Environments
 .venv/
+.venv-mmdet3d/
+.venv-maptr/
+.env
 __pycache__/
-data/
+
+# Weights and vendored sources
+*.pt
+*.pth
 models/
+checkpoints/
+external/
+
+# Inputs and generated artifacts
+data/
+logs/
 output/
 outputs/
-.claude/
-logs/
 out_final/
-CLAUDE.md
-*.pt
-.env
-agents.md
-external/
-.venv-mmdet3d/
-checkpoints/
-*.pth
+papers/
+docs/_whitepaper_assets/

@@ -12,14 +12,13 @@ viewing frustum, and the LiDAR points inside it localise the object in 3D.
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from fsd.bev import lidar_points_to_ego, render_lidar_bev
-from fsd.data import CAMERA_CHANNELS, CameraFrame, LidarFrame, NuScenesSceneLoader, SurroundFrame
+from fsd.data import CAMERA_CHANNELS, CameraFrame, LidarFrame, SurroundFrame
 from fsd.lidar_projection import lidar_points_to_camera, load_lidar_points
 from fsd.object_detection import Box3D, draw_boxes_on_bev, make_ego_box, render_camera_box_sheet
 
@@ -209,89 +208,3 @@ def render_fusion_bev(
 
 def render_fusion_cameras(frame: SurroundFrame, boxes: list[Box3D], tile_width: int = 360) -> np.ndarray:
     return render_camera_box_sheet(frame, gt_boxes=[], pred_boxes=boxes, tile_width=tile_width)
-
-
-def save_fusion_sequence(
-    dataroot: str | Path | None = None,
-    scene_index: int = 0,
-    scene_name: str | None = None,
-    start_sample_index: int = 0,
-    max_frames: int | None = 40,
-    weights_path: str | Path = "yolo26n.pt",
-    output_path: str | Path = "outputs/nuscenes_fusion_objects_scene0_40f.mp4",
-    fps: float = 2.0,
-    resolution: float = 0.25,
-    scale: int = 2,
-    device: str | None = None,
-) -> Path:
-    loader = NuScenesSceneLoader(dataroot=dataroot)
-    detector = FrustumFusionDetector(weights_path=weights_path, device=device)
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    writer = None
-    rendered = 0
-    try:
-        for frame, lidar in loader.iter_scene_frames(
-            scene_index=scene_index,
-            start_sample_index=start_sample_index,
-            max_frames=max_frames,
-            scene_name=scene_name,
-            include_lidar=True,
-        ):
-            if lidar is None:
-                raise RuntimeError("LiDAR frame was not loaded")
-            boxes = detector.detect(frame, lidar)
-            image = render_fusion_bev(frame, lidar, boxes, resolution=resolution, scale=scale)
-            rendered += 1
-            if writer is None:
-                height, width = image.shape[:2]
-                writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
-                if not writer.isOpened():
-                    raise OSError(f"Could not open video writer: {output}")
-            writer.write(image)
-    finally:
-        if writer is not None:
-            writer.release()
-
-    if rendered == 0:
-        raise RuntimeError("No detection frames were rendered")
-    return output
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Camera+LiDAR frustum-fusion object detection over nuScenes.")
-    parser.add_argument("--dataroot", default=None, help="nuScenes root. Defaults to NUSCENES_ROOT or D:/nuscenes.")
-    parser.add_argument("--scene-index", type=int, default=0, help="Scene index to render.")
-    parser.add_argument("--scene-name", default=None, help="Scene name to render, e.g. scene-0001.")
-    parser.add_argument("--start-sample-index", type=int, default=0, help="First key sample index within the scene.")
-    parser.add_argument("--frames", type=int, default=40, help="Maximum number of key samples to render.")
-    parser.add_argument("--weights", default="yolo26n.pt", help="YOLO weights path.")
-    parser.add_argument("--fps", type=float, default=2.0, help="Output video FPS.")
-    parser.add_argument("--resolution", type=float, default=0.25, help="BEV grid meters per cell.")
-    parser.add_argument("--scale", type=int, default=2, help="Nearest-neighbor scale for saved output.")
-    parser.add_argument("--device", default=None, help="Inference device, e.g. 'cuda', 'cpu'.")
-    parser.add_argument("--output", default="outputs/nuscenes_fusion_objects_scene0_40f.mp4", help="Output video path.")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    output = save_fusion_sequence(
-        dataroot=args.dataroot,
-        scene_index=args.scene_index,
-        scene_name=args.scene_name,
-        start_sample_index=args.start_sample_index,
-        max_frames=args.frames,
-        weights_path=args.weights,
-        output_path=args.output,
-        fps=args.fps,
-        resolution=args.resolution,
-        scale=args.scale,
-        device=args.device,
-    )
-    print(output)
-
-
-if __name__ == "__main__":
-    main()

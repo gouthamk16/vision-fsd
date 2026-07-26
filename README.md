@@ -1,6 +1,6 @@
-## Vision for FSD 
+## Vision for FSD
 
-Vision-based path tracking and environment mapping for autonomous vehicles. Extracting important features from monocular frames for advanced driver assistance systems. Currently also working on interpreting features from surround vision and lidar inputs.
+Vision-based path tracking and environment mapping for autonomous vehicles. Extracting important features from monocular frames for advanced driver assistance systems, and interpreting features from surround vision and lidar inputs.
 
 **Implemented using geometry based feature extractors and open-sourced models. Not practically useful, more of a research oriented project.**
 
@@ -12,52 +12,24 @@ A major challenge in developing such systems is the massive amounts of annotated
 
 Research/Study on hardware required to run such systems [here](hardware.md)
 
----
+The repo holds two independent pipelines:
 
-## What the monocular vision extractor does
-
-Each video frame is passed through four subsystems running in sequence:
-
-| Subsystem | Model | Output |
+| | [`fsd/`](fsd/) — active | [`monocular_vision/`](monocular_vision/) — legacy |
 |---|---|---|
-| Object detection + tracking | YOLOv2.6 + ByteTrack | 2D bounding boxes with locked class labels and per-object distance |
-| Monocular depth estimation | DepthAnything V2 (metric outdoor) | Per-pixel depth map in metres |
-| Drivable area segmentation | YOLOPv2 | Binary pixel mask separating drivable road from non-drivable regions |
-| Visual odometry | SIFT + FLANN + Essential matrix | Camera pose and trajectory |
-
-Depth and segmentation outputs are fused in the final render: the drivable area is overlaid as a green tint on the frame, detected vehicles get per-object distance labels from the depth map, and everything is summarised in a bird's-eye-view (BEV) minimap covering ~83 m forward range.
-
-## Results
-
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="results/result1.png" width="100%"><br>
-      <sub>Detection + drivable-area segmentation + BEV minimap</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="results/result-depth.png" width="100%"><br>
-      <sub>Monocular depth estimation (a different frame)</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <img src="results/city.png" width="100%"><br>
-      <sub>Understands double yellow lines - only the current lane is marked drivable</sub>
-    </td>
-    <td width="50%"></td>
-  </tr>
-</table>
+| Input | nuScenes: 6 surround cameras + LiDAR | a single dashcam video |
+| Run | `python -m fsd.visualize` | `python main.py <video>` |
 
 ---
 
-## 360 Vision - nuScenes 
+## 360 Vision - nuScenes
 
-Beyond single-camera dashcam footage, we also work with the [nuScenes](https://www.nuscenes.org/) dataset, which has six surround-view cameras + LiDAR on a real autonomous vehicle. This lets us look in all directions at once and work with proper 3D sensor data instead of inferring depth from a single image. Implemented in the [fsd](fsd/) folder.
+We work with the [nuScenes](https://www.nuscenes.org/) dataset, which has six surround-view cameras + LiDAR on a real autonomous vehicle. This lets us look in all directions at once and work with proper 3D sensor data instead of inferring depth from a single image.
 
 nuScenes is organised as ~850 independent 20-second driving clips (called scenes), each with ~40 keyframes at 2 Hz. They're not continuous - scene 5 has nothing to do with scene 6 temporally or geographically, but each scene on its own is a clean, calibrated, fully-labelled snippet of real urban driving.
 
 ### What we can visualise
+
+`fsd/visualize.py` is the single entry point for the whole nuScenes stack; every other module in `fsd/` is a library it calls.
 
 | View | What it shows |
 |---|---|
@@ -67,9 +39,11 @@ nuScenes is organised as ~850 independent 20-second driving clips (called scenes
 | `lss_bev` | Camera-only BEV vehicle prediction from Lift-Splat-Shoot, drawn on top of the nuScenes HD map |
 | `lss_lidar_bev` | LSS prediction blended onto the LiDAR BEV for a direct sanity check |
 | `occupancy_bev` | Temporal log-odds occupancy map fused across keyframes into a rolling world model |
+| `height_bev` | 2.5D BEV tensor - per-cell point density and min/max/mean/range height channels |
+| `objects_bev` | Camera+LiDAR frustum-fusion 3D detections on the LiDAR BEV |
+| `objects_cameras` | The same fusion detections drawn back onto the six camera images |
 | `planner_bev` | Offline LiDAR BEV planner: candidate trajectories, selected path, and collision context |
 | `planner_camera` | Front-camera overlay with selected path projected onto video and a compact BEV panel |
-| `height_bev` | 2.5D BEV tensor - per-cell point density and min/max/mean/range height channels |
 | `world_bev` | Unified BEV world model: occupancy, height/collision context, ego state, object footprints, and per-object velocity arrows + predicted motion |
 | `all` | All views rendered simultaneously |
 
@@ -155,7 +129,7 @@ python -m fsd.visualize --view lidar --frames all --save
 # Stitch scenes 0 through 9 into one video
 python -m fsd.visualize --scenes 0-9 --frames all --view cameras --save
 
-# Stream all three views at once
+# Stream all views at once
 python -m fsd.visualize --view all --frames all --stream
 
 # Unified BEV world model
@@ -196,16 +170,67 @@ python -m fsd.visualize --dataroot D:/nuscenes --view planner_camera --frames 20
 
 ---
 
+## Monocular vision extractor - legacy
+
+This was the original single-camera pipeline, kept because it still runs. Active work happens on the nuScenes stack above.
+
+Each video frame is passed through four subsystems running in sequence:
+
+| Subsystem | Model | Output |
+|---|---|---|
+| Object detection + tracking | YOLOv2.6 + ByteTrack | 2D bounding boxes with locked class labels and per-object distance |
+| Monocular depth estimation | DepthAnything V2 (metric outdoor) | Per-pixel depth map in metres |
+| Drivable area segmentation | YOLOPv2 | Binary pixel mask separating drivable road from non-drivable regions |
+| Visual odometry | SIFT + FLANN + Essential matrix | Camera pose and trajectory |
+
+Depth and segmentation outputs are fused in the final render: the drivable area is overlaid as a green tint on the frame, detected vehicles get per-object distance labels from the depth map, and everything is summarised in a bird's-eye-view (BEV) minimap covering ~83 m forward range.
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="results/result1.png" width="100%"><br>
+      <sub>Detection + drivable-area segmentation + BEV minimap</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="results/result-depth.png" width="100%"><br>
+      <sub>Monocular depth estimation (a different frame)</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="results/city.png" width="100%"><br>
+      <sub>Understands double yellow lines - only the current lane is marked drivable</sub>
+    </td>
+    <td width="50%"></td>
+  </tr>
+</table>
+
+### Run
+
+```bash
+# Stream processed output to screen
+python main.py data/your_video.mp4 --stream
+
+# Save annotated video to outputs/
+python main.py data/your_video.mp4 --save
+
+# Limit to first N frames (useful for quick tests)
+python main.py data/your_video.mp4 --stream --frames 300
+
+# Full options
+python main.py --help
+```
+
+Place a dashcam video under `data/` and pass the path at runtime. Outputs land in `outputs/`, logs in `logs/`; `LOGGING_LEVEL` sets verbosity.
+
+---
+
 ## Requirements
 
 - Python 3.12
 - CUDA-capable GPU (tested on RTX 4060, CUDA 12.8)
 
----
-
 ## Setup
-
-### 1. Clone and create environment
 
 ```bash
 git clone <this-repo>
@@ -217,43 +242,22 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 
-### 2. Install PyTorch with CUDA
-
-Install the CUDA 12.8 build from pytorch.org. The requirements.txt pins the `+cu128` variants, so install those first before the rest of the deps:
+Install the CUDA 12.8 PyTorch build first, since `requirements.txt` pins the `+cu128` variants:
 
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-```
-
-### 3. Install remaining dependencies
-
-```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```
 
-### 4. Add your video
+`fsd/centerpoint_export.py` is deliberately not covered by `requirements.txt` — it needs mmdet3d against torch 2.1/cu121 and runs in its own `.venv-mmdet3d`.
 
-Place a dashcam video at `data/` and pass the path at runtime.
-
----
-
-## Run
+## Tests
 
 ```bash
-# Stream processed output to screen
-python main.py data/your_video.mp4 --stream
-
-# Save annotated video to disk
-python main.py data/your_video.mp4 --save
-
-# Limit to first N frames (useful for quick tests)
-python main.py data/your_video.mp4 --stream --frames 300
-
-# Full options
-python main.py --help
+pytest tests/
 ```
 
----
+51 tests, mostly covering the planner and tracking. No GPU or dataset needed.
 
 ## Models
 
@@ -264,9 +268,7 @@ python main.py --help
 | DepthAnything V2 (metric outdoor large) | ~335 MB | Auto-downloaded from HuggingFace on first run |
 | Lift-Splat-Shoot BEV vehicle seg (`model525000.pt`) | ~55 MB | Manual: [Google Drive](https://drive.google.com/file/d/1bsUYveW_eOqa4lglryyGQNeC4fyQWvQQ/view?usp=sharing), drop into `models/` and pass via `--lss-weights` |
 
----
-
 ## Todo
 
-- Extended Kalman filters for trajectory mapping and path tracking
+- Extended Kalman filters for trajectory mapping and path tracking — in progress on `feat/ctrv-ekf-tracking`
 - Lane detection (probably using a pretrained model, training a lane det model today is useless)

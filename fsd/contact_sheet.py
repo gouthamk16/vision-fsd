@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
 import cv2
 import numpy as np
 
-from fsd.data import CAMERA_CHANNELS, NuScenesSceneLoader, SurroundFrame
+from fsd.data import CAMERA_CHANNELS, SurroundFrame
 
 
 def render_contact_sheet(frame: SurroundFrame, tile_width: int = 640) -> np.ndarray:
@@ -59,54 +56,3 @@ def render_contact_sheet(frame: SurroundFrame, tile_width: int = 640) -> np.ndar
     y += top.shape[0]
     sheet[y:y + bottom.shape[0], :] = bottom
     return sheet
-
-
-def save_contact_sheet(
-    dataroot: str | Path | None = None,
-    scene_index: int = 0,
-    sample_index: int = 0,
-    scene_name: str | None = None,
-    output_path: str | Path = "outputs/nuscenes_contact_sheet.jpg",
-    tile_width: int = 640,
-) -> Path:
-    loader = NuScenesSceneLoader(dataroot=dataroot)
-    frame = loader.get_surround_frame(
-        scene_index=scene_index,
-        sample_index=sample_index,
-        scene_name=scene_name,
-    )
-    sheet = render_contact_sheet(frame, tile_width=tile_width)
-
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(output), sheet):
-        raise OSError(f"Failed to write contact sheet: {output}")
-    return output
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render a nuScenes six-camera contact sheet.")
-    parser.add_argument("--dataroot", default=None, help="nuScenes root. Defaults to NUSCENES_ROOT or D:/nuscenes.")
-    parser.add_argument("--scene-index", type=int, default=0, help="Scene index to render.")
-    parser.add_argument("--scene-name", default=None, help="Scene name to render, e.g. scene-0001.")
-    parser.add_argument("--sample-index", type=int, default=0, help="Sample index within the scene.")
-    parser.add_argument("--tile-width", type=int, default=640, help="Width of each camera tile in pixels.")
-    parser.add_argument("--output", default="outputs/nuscenes_contact_sheet.jpg", help="Output image path.")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    output = save_contact_sheet(
-        dataroot=args.dataroot,
-        scene_index=args.scene_index,
-        sample_index=args.sample_index,
-        scene_name=args.scene_name,
-        output_path=args.output,
-        tile_width=args.tile_width,
-    )
-    print(output)
-
-
-if __name__ == "__main__":
-    main()

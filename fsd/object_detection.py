@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,8 +8,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from fsd.bev import render_lidar_bev
-from fsd.data import CAMERA_CHANNELS, CameraFrame, LidarFrame, NuScenesSceneLoader, SurroundFrame, _iter_json_objects
+from fsd.data import CAMERA_CHANNELS, CameraFrame, NuScenesSceneLoader, SurroundFrame, _iter_json_objects
 from fsd.lidar_projection import inverse_transform_points, quaternion_to_rotation_matrix, transform_points
 
 
@@ -427,65 +425,6 @@ def draw_boxes_on_bev(
     return image
 
 
-def draw_gt_and_prediction_boxes_on_bev(
-    bev_image: np.ndarray,
-    gt_boxes: list[Box3D],
-    pred_boxes: list[Box3D],
-    resolution: float = 0.25,
-    scale: int = 2,
-) -> np.ndarray:
-    image = draw_boxes_on_bev(
-        bev_image,
-        gt_boxes,
-        resolution=resolution,
-        scale=scale,
-        color_override=GT_COLOR,
-        title="GT boxes",
-        thickness=2,
-    )
-    image = draw_boxes_on_bev(
-        image,
-        pred_boxes,
-        resolution=resolution,
-        scale=scale,
-        color_override=PRED_COLOR,
-        title="Pred boxes",
-        thickness=2,
-        label_scores=True,
-    )
-    cv2.putText(image, "GT=green  prediction=red", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
-    return image
-
-
-def render_gt_boxes_bev(
-    frame: SurroundFrame,
-    lidar: LidarFrame,
-    boxes: list[Box3D],
-    resolution: float = 0.25,
-    scale: int = 2,
-) -> np.ndarray:
-    bev = render_lidar_bev(frame, lidar, resolution=resolution, scale=scale)
-    return draw_boxes_on_bev(bev, boxes, resolution=resolution, scale=scale)
-
-
-def render_gt_prediction_bev(
-    frame: SurroundFrame,
-    lidar: LidarFrame,
-    gt_boxes: list[Box3D],
-    pred_boxes: list[Box3D],
-    resolution: float = 0.25,
-    scale: int = 2,
-) -> np.ndarray:
-    bev = render_lidar_bev(frame, lidar, resolution=resolution, scale=scale)
-    return draw_gt_and_prediction_boxes_on_bev(
-        bev,
-        gt_boxes=gt_boxes,
-        pred_boxes=pred_boxes,
-        resolution=resolution,
-        scale=scale,
-    )
-
-
 def project_ego_box_to_camera(
     box: Box3D,
     frame: SurroundFrame,
@@ -591,96 +530,3 @@ def render_camera_box_sheet(
     y += top.shape[0]
     sheet[y:y + bottom.shape[0], :] = bottom
     return sheet
-
-
-def save_gt_boxes_bev_sequence(
-    dataroot: str | Path | None = None,
-    scene_index: int = 0,
-    scene_name: str | None = None,
-    start_sample_index: int = 0,
-    max_frames: int | None = 40,
-    output_path: str | Path = "outputs/nuscenes_gt_boxes_bev_scene0_40f.mp4",
-    fps: float = 2.0,
-    resolution: float = 0.25,
-    scale: int = 2,
-    min_lidar_points: int = 1,
-) -> Path:
-    loader = NuScenesSceneLoader(dataroot=dataroot)
-    annotation_loader = NuScenesAnnotationLoader(loader)
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    scene = loader._select_scene(scene_index=scene_index, scene_name=scene_name)
-    samples = loader._sample_sequence(scene, start_sample_index, max_frames)
-    annotation_loader.prefetch_sample_annotations({sample["token"] for _, sample in samples})
-
-    writer = None
-    rendered = 0
-    try:
-        for frame, lidar in loader.iter_scene_frames(
-            scene_index=scene_index,
-            start_sample_index=start_sample_index,
-            max_frames=max_frames,
-            scene_name=scene_name,
-            include_lidar=True,
-        ):
-            if lidar is None:
-                raise RuntimeError("LiDAR frame was not loaded")
-            boxes = annotation_loader.boxes_for_frame(frame, min_lidar_points=min_lidar_points)
-            image = render_gt_boxes_bev(frame, lidar, boxes, resolution=resolution, scale=scale)
-            rendered += 1
-
-            if writer is None:
-                height, width = image.shape[:2]
-                writer = cv2.VideoWriter(
-                    str(output),
-                    cv2.VideoWriter_fourcc(*"mp4v"),
-                    fps,
-                    (width, height),
-                )
-                if not writer.isOpened():
-                    raise OSError(f"Could not open video writer: {output}")
-            writer.write(image)
-    finally:
-        if writer is not None:
-            writer.release()
-
-    if rendered == 0:
-        raise RuntimeError("No frames were rendered")
-    return output
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render nuScenes GT 3D boxes on ego-frame LiDAR BEV.")
-    parser.add_argument("--dataroot", default=None, help="nuScenes root. Defaults to NUSCENES_ROOT or D:/nuscenes.")
-    parser.add_argument("--scene-index", type=int, default=0, help="Scene index to render.")
-    parser.add_argument("--scene-name", default=None, help="Scene name to render, e.g. scene-0001.")
-    parser.add_argument("--start-sample-index", type=int, default=0, help="First key sample index within the scene.")
-    parser.add_argument("--frames", type=int, default=40, help="Maximum number of key samples to render.")
-    parser.add_argument("--fps", type=float, default=2.0, help="Output video FPS.")
-    parser.add_argument("--resolution", type=float, default=0.25, help="BEV grid meters per cell.")
-    parser.add_argument("--scale", type=int, default=2, help="Nearest-neighbor scale for saved output.")
-    parser.add_argument("--min-lidar-points", type=int, default=1, help="Minimum LiDAR points required per GT box.")
-    parser.add_argument("--output", default="outputs/nuscenes_gt_boxes_bev_scene0_40f.mp4", help="Output video path.")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    output = save_gt_boxes_bev_sequence(
-        dataroot=args.dataroot,
-        scene_index=args.scene_index,
-        scene_name=args.scene_name,
-        start_sample_index=args.start_sample_index,
-        max_frames=args.frames,
-        output_path=args.output,
-        fps=args.fps,
-        resolution=args.resolution,
-        scale=args.scale,
-        min_lidar_points=args.min_lidar_points,
-    )
-    print(output)
-
-
-if __name__ == "__main__":
-    main()

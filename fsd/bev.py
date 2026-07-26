@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
 import cv2
 import numpy as np
 
-from fsd.data import LidarFrame, NuScenesSceneLoader, SurroundFrame
+from fsd.data import LidarFrame, SurroundFrame
 from fsd.lidar_projection import load_lidar_points, transform_points
 
 
@@ -142,83 +139,3 @@ def render_lidar_bev(
     if scale > 1:
         output = cv2.resize(output, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
     return output
-
-
-def save_lidar_bev_sequence(
-    dataroot: str | Path | None = None,
-    scene_index: int = 0,
-    scene_name: str | None = None,
-    start_sample_index: int = 0,
-    max_frames: int | None = 40,
-    output_path: str | Path = "outputs/nuscenes_lidar_bev_scene0_40f.mp4",
-    fps: float = 2.0,
-    resolution: float = 0.25,
-    scale: int = 2,
-) -> Path:
-    loader = NuScenesSceneLoader(dataroot=dataroot)
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    writer = None
-    rendered = 0
-    try:
-        for frame, lidar in loader.iter_scene_frames(
-            scene_index=scene_index,
-            start_sample_index=start_sample_index,
-            max_frames=max_frames,
-            scene_name=scene_name,
-            include_lidar=True,
-        ):
-            if lidar is None:
-                raise RuntimeError("LiDAR frame was not loaded")
-            bev = render_lidar_bev(frame, lidar, resolution=resolution, scale=scale)
-            rendered += 1
-
-            if writer is None:
-                height, width = bev.shape[:2]
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                writer = cv2.VideoWriter(str(output), fourcc, fps, (width, height))
-                if not writer.isOpened():
-                    raise OSError(f"Could not open video writer: {output}")
-            writer.write(bev)
-    finally:
-        if writer is not None:
-            writer.release()
-
-    if rendered == 0:
-        raise RuntimeError("No BEV frames were rendered")
-    return output
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render ego-frame LiDAR BEV videos from nuScenes.")
-    parser.add_argument("--dataroot", default=None, help="nuScenes root. Defaults to NUSCENES_ROOT or D:/nuscenes.")
-    parser.add_argument("--scene-index", type=int, default=0, help="Scene index to render.")
-    parser.add_argument("--scene-name", default=None, help="Scene name to render, e.g. scene-0001.")
-    parser.add_argument("--start-sample-index", type=int, default=0, help="First key sample index within the scene.")
-    parser.add_argument("--frames", type=int, default=40, help="Maximum number of key samples to render.")
-    parser.add_argument("--fps", type=float, default=2.0, help="Output video FPS.")
-    parser.add_argument("--resolution", type=float, default=0.25, help="BEV grid meters per cell.")
-    parser.add_argument("--scale", type=int, default=2, help="Nearest-neighbor scale for saved output.")
-    parser.add_argument("--output", default="outputs/nuscenes_lidar_bev_scene0_40f.mp4", help="Output video path.")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    output = save_lidar_bev_sequence(
-        dataroot=args.dataroot,
-        scene_index=args.scene_index,
-        scene_name=args.scene_name,
-        start_sample_index=args.start_sample_index,
-        max_frames=args.frames,
-        output_path=args.output,
-        fps=args.fps,
-        resolution=args.resolution,
-        scale=args.scale,
-    )
-    print(output)
-
-
-if __name__ == "__main__":
-    main()

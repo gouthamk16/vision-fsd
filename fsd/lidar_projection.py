@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from fsd.data import CAMERA_CHANNELS, CameraFrame, LidarFrame, NuScenesSceneLoader, SurroundFrame
+from fsd.data import CAMERA_CHANNELS, CameraFrame, LidarFrame, SurroundFrame
 
 
 def load_lidar_points(path: str | Path) -> np.ndarray:
@@ -193,75 +192,3 @@ def render_lidar_projection_sheet(
     y += top.shape[0]
     sheet[y:y + bottom.shape[0], :] = bottom
     return sheet
-
-
-def save_lidar_projection_sheet(
-    dataroot: str | Path | None = None,
-    scene_index: int = 0,
-    sample_index: int = 0,
-    scene_name: str | None = None,
-    output_path: str | Path = "outputs/nuscenes_lidar_projection_scene0_sample0.jpg",
-    tile_width: int = 640,
-    max_depth: float = 80.0,
-    point_radius: int = 1,
-) -> Path:
-    loader = NuScenesSceneLoader(dataroot=dataroot)
-    frame = loader.get_surround_frame(
-        scene_index=scene_index,
-        sample_index=sample_index,
-        scene_name=scene_name,
-    )
-    lidar = loader.get_lidar_frame(
-        scene_index=scene_index,
-        sample_index=sample_index,
-        scene_name=scene_name,
-    )
-    sheet = render_lidar_projection_sheet(
-        frame,
-        lidar,
-        tile_width=tile_width,
-        max_depth=max_depth,
-        point_radius=point_radius,
-    )
-
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(output), sheet):
-        raise OSError(f"Failed to write LiDAR projection sheet: {output}")
-    return output
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Project nuScenes LIDAR_TOP points into six camera images.")
-    parser.add_argument("--dataroot", default=None, help="nuScenes root. Defaults to NUSCENES_ROOT or D:/nuscenes.")
-    parser.add_argument("--scene-index", type=int, default=0, help="Scene index to render.")
-    parser.add_argument("--scene-name", default=None, help="Scene name to render, e.g. scene-0001.")
-    parser.add_argument("--sample-index", type=int, default=0, help="Sample index within the scene.")
-    parser.add_argument("--tile-width", type=int, default=640, help="Width of each camera tile in pixels.")
-    parser.add_argument("--max-depth", type=float, default=80.0, help="Depth in meters used for color scaling.")
-    parser.add_argument("--point-radius", type=int, default=2, help="Projected point radius in pixels.")
-    parser.add_argument(
-        "--output",
-        default="outputs/nuscenes_lidar_projection_scene0_sample0.jpg",
-        help="Output image path.",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    output = save_lidar_projection_sheet(
-        dataroot=args.dataroot,
-        scene_index=args.scene_index,
-        sample_index=args.sample_index,
-        scene_name=args.scene_name,
-        output_path=args.output,
-        tile_width=args.tile_width,
-        max_depth=args.max_depth,
-        point_radius=args.point_radius,
-    )
-    print(output)
-
-
-if __name__ == "__main__":
-    main()
