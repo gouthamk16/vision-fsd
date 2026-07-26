@@ -31,8 +31,6 @@ class FrameProcessor:
         self.logger.debug('Starting frame processing.')
 
         try:
-            # If the image has an overall darkened hue, then use the image decomposition method to increase vsibility (i.e., nighttime image enhancement)
-            # frame = something.enhance_image(frame)
             feature_frame, _, _, feature_time, success = self.feature_extractor.process_frame(frame)
             self.logger.debug(f'Feature extraction completed in {feature_time*1000:.2f}ms.')
 
