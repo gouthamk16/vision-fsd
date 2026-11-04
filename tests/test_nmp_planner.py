@@ -120,3 +120,11 @@ def test_match_ignores_vehicles_without_lidar_points_or_outside_the_grid():
     gt[1, :, 1] = 6.0  # and this one outside it
     scores, tps, _, n_gt = _match([], np.zeros((0, T + 1, 3)), gt, np.ones((3, T + 1), bool), np.full(3, car), np.array([0, 9, 9]), CFG)
     assert n_gt == 1
+
+
+def test_plan_beyond_the_grid_is_not_counted_off_road():
+    plan = np.zeros((T, 3), np.float32)
+    plan[:, 0] = np.linspace(2.0, 12.0, T)  # CFG's grid ends at x = 8 m: the map can't judge the last steps
+    metrics = PlanMetrics()
+    metrics.add(plan, plan, np.zeros((0, T + 1, 5), np.float32), np.zeros((0, T + 1), bool), np.ones(CFG.grid.shape, bool), CFG)
+    assert metrics.summary()["offroad_3s"] == 0.0
