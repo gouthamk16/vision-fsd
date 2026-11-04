@@ -47,6 +47,14 @@ def voxelize(points: np.ndarray, sweep: np.ndarray, cfg: NmpConfig) -> np.ndarra
     return np.unique((channel * h + rows[keep]) * w + cols[keep]).astype(np.uint32)
 
 
+def dense_input(voxels: np.ndarray, map_masks: np.ndarray, cfg: NmpConfig) -> np.ndarray:
+    """(in_channels, H, W) uint8 network input from sparse voxel indices and map masks."""
+    h, w = cfg.grid.shape
+    dense = np.zeros(cfg.n_sweeps * cfg.z_bins * h * w, np.uint8)
+    dense[voxels] = 1
+    return np.concatenate([dense.reshape(-1, h, w), map_masks])
+
+
 def ego_state(lidar: LidarFrame) -> tuple[float, float]:
     """(speed m/s, curvature 1/m) from the ego-pose change over the last ~0.1 s of sweeps."""
     if len(lidar.sweeps) < 2:
@@ -60,7 +68,7 @@ def ego_state(lidar: LidarFrame) -> tuple[float, float]:
     return speed, curvature
 
 
-def _sweep_points(lidar: LidarFrame, cfg: NmpConfig) -> tuple[np.ndarray, np.ndarray]:
+def sweep_points(lidar: LidarFrame, cfg: NmpConfig) -> tuple[np.ndarray, np.ndarray]:
     selected = LidarFrame(lidar.sweeps[:: cfg.sweep_stride][: cfg.n_sweeps])
     points = lidar_points_ego(selected)
     ages = np.array([(selected.timestamp_us - s.timestamp_us) * 1e-6 for s in selected.sweeps], dtype=np.float32)
@@ -118,7 +126,7 @@ def _sample(
 ) -> NmpSample:
     frame = window[0]
     future = [f.ego_pose.relative_to(frame.ego_pose) for f in window[1:]]
-    points, sweep = _sweep_points(lidar, cfg)
+    points, sweep = sweep_points(lidar, cfg)
     boxes, valid, classes = _future_boxes(window, [loader.annotations(f.sample_token) for f in window], annotations.category_of_instance)
     v0, k0 = ego_state(lidar)
     return NmpSample(

@@ -11,7 +11,7 @@ from torch.utils.data import Dataset
 
 from fsd.bev import SHIFT, fixed_point
 from fsd.nmp.config import NmpConfig
-from fsd.nmp.samples import NmpSample, load_sample
+from fsd.nmp.samples import NmpSample, dense_input, load_sample
 from fsd.object_detection import Box3D
 
 # Obstacles grow by ~the ego half-width, so a trajectory point (the ego body
@@ -47,12 +47,8 @@ class NmpDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample = load_sample(self.paths[index])
-        h, w = self.cfg.grid.shape
-        voxels = np.zeros((self.cfg.n_sweeps * self.cfg.z_bins) * h * w, np.uint8)
-        voxels[sample.voxels] = 1
-        dense = np.concatenate([voxels.reshape(-1, h, w), sample.map_masks])
         return {
-            "input": torch.from_numpy(dense),
+            "input": torch.from_numpy(dense_input(sample.voxels, sample.map_masks, self.cfg)),
             "ego_future": torch.from_numpy(sample.ego_future),
             "v0": torch.tensor(sample.v0, dtype=torch.float32),
             "k0": torch.tensor(sample.k0, dtype=torch.float32),
