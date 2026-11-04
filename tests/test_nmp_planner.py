@@ -5,9 +5,12 @@ import numpy as np
 import torch
 
 from fsd.nmp.config import NmpConfig
+from fsd.nmp.evaluate import _match
 from fsd.nmp.metrics import PlanMetrics, boxes_overlap, constant_velocity_plan, ego_footprint
 from fsd.nmp.model import NmpOutput
 from fsd.nmp.planner import decode_detections, select_plan
+from fsd.nmp.samples import CLASS_NAMES
+from fsd.object_detection import Box3D
 
 CFG = replace(NmpConfig(), x_range=(-8.0, 8.0), y_range=(-4.8, 4.8))
 T = CFG.horizon
@@ -85,3 +88,14 @@ def test_decode_detections_recovers_a_peak():
     boxes, forecasts = decode_detections(NmpOutput(cls, reg, torch.zeros(1, T, *CFG.grid.shape)), CFG)
     assert len(boxes[0]) == 1 and forecasts[0].shape == (1, T + 1, 3)
     assert math.isclose(float(boxes[0][0].size[1]), 4.6, rel_tol=1e-5)
+
+
+def test_match_ignores_vehicles_beyond_eval_range():
+    car = CLASS_NAMES.index(CFG.det_classes[0])
+    gt = np.zeros((2, T + 1, 5), np.float32)
+    gt[0, :, 0], gt[1, :, 0] = 10.0, 60.0
+    forecasts = np.zeros((2, T + 1, 3), np.float32)
+    forecasts[0, :, 0], forecasts[1, :, 0] = 10.0, 60.0
+    dets = [Box3D("car", np.array([x, 0.0, 0.8]), np.array([1.9, 4.6, 1.6]), 0.0, 0.9) for x in (10.0, 60.0)]
+    scores, tps, _, n_gt = _match(dets, forecasts, gt, np.ones((2, T + 1), bool), np.array([car, car]), CFG)
+    assert n_gt == 1 and scores == [0.9] and tps == [True]

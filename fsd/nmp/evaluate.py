@@ -16,6 +16,9 @@ from fsd.nmp.samples import CLASS_NAMES
 from fsd.nmp.trajectories import sample_trajectories
 
 MATCH_DISTANCE_M = 2.0
+# nuScenes detection eval: cars count within 50 m. AP ranks every detection, so decode far below the view's 0.3.
+MAX_RANGE_M = 50.0
+AP_THRESHOLD = 0.05
 # Khurana et al., ECCV 2022, Tab. 4: simplified NMP (no map cost) on nuScenes-val.
 REFERENCE = {"l2": (0.53, 1.25, 2.67), "collision": (0.04, 0.12, 0.87)}
 
@@ -46,10 +49,13 @@ def evaluate(model: NeuralMotionPlanner, loader, cfg: NmpConfig) -> dict[str, fl
 def _match(boxes, forecasts, gt_boxes, gt_valid, gt_class, cfg: NmpConfig):
     """Greedy distance matching at step 0: (scores, true-positive flags, forecast errors (n, 3), n_gt)."""
     detect = [CLASS_NAMES.index(c) for c in cfg.det_classes]
-    gt_rows = np.flatnonzero(gt_valid[:, 0] & np.isin(gt_class, detect))
+    near = np.hypot(gt_boxes[:, 0, 0], gt_boxes[:, 0, 1]) <= MAX_RANGE_M
+    gt_rows = np.flatnonzero(gt_valid[:, 0] & np.isin(gt_class, detect) & near)
     free = set(gt_rows.tolist())
     scores, tps, errors = [], [], []
     for i in np.argsort([-b.score for b in boxes]):
+        if np.hypot(*forecasts[i, 0, :2]) > MAX_RANGE_M:
+            continue
         dists = {r: float(np.hypot(*(gt_boxes[r, 0, :2] - forecasts[i, 0, :2]))) for r in free}
         row = min(dists, key=dists.get) if dists else None
         hit = row is not None and dists[row] < MATCH_DISTANCE_M
@@ -81,7 +87,7 @@ def report(weights: Path, cache_dir: Path, split: str, cfg: NmpConfig) -> str:
     nmp, cv = PlanMetrics(), PlanMetrics()
     scores, tps, errors, n_gt = [], [], [], 0
     for batch, out, plans in _plans(model, make_loader(cache_dir, split, cfg, 4, 4, None, False), cfg):
-        boxes, forecasts = decode_detections(out, cfg)
+        boxes, forecasts = decode_detections(out, cfg, AP_THRESHOLD)
         for b, plan in enumerate(plans):
             args = (batch["ego_future"][b], batch["boxes"][b], batch["box_valid"][b], batch["drivable"][b], cfg)
             nmp.add(plan, *args)
@@ -100,5 +106,5 @@ def _table(cv: dict, nmp: dict, ap: float, errors: np.ndarray) -> str:
     ref = [*REFERENCE["l2"], *REFERENCE["collision"], *("-",) * 3]
     lines.append("| NMP ref (Khurana et al. ECCV'22, nuScenes-val, no map) | " + " | ".join(str(v) for v in ref) + " |")
     forecast = ", ".join(f"{s}s {np.nanmean(errors[:, i]):.2f} m" for i, s in enumerate(REPORT_SECONDS)) if len(errors) else "n/a"
-    lines += ["", f"samples: {int(nmp['samples'])} | vehicle AP @ {MATCH_DISTANCE_M:.0f} m: {ap:.3f} | forecast L2 of matched: {forecast}"]
+    lines += ["", f"samples: {int(nmp['samples'])} | vehicle AP @ {MATCH_DISTANCE_M:.0f} m within {MAX_RANGE_M:.0f} m: {ap:.3f} | forecast L2 of matched: {forecast}"]
     return "\n".join(lines)
