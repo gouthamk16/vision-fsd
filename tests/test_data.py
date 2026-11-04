@@ -59,3 +59,13 @@ def test_samples_slices_start_and_max_frames():
     assert loader.samples(scene, 2, 0) == []
     with pytest.raises(IndexError, match="beyond scene length 3"):
         loader.samples(scene, 3)
+
+
+def test_future_ego_poses_stops_at_scene_end():
+    from fsd.data import LIDAR_TOP
+
+    loader, _ = _loader_with_samples(3)
+    loader._keyframes = {f"s{i}": {LIDAR_TOP: {"ego_pose_token": f"p{i}"}} for i in range(3)}
+    loader.index.ego_poses = {f"p{i}": {"translation": [float(i), 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0]} for i in range(3)}
+    poses = loader.future_ego_poses("s0", steps=6)
+    assert [p.translation[0] for p in poses] == [1.0, 2.0]

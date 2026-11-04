@@ -79,6 +79,9 @@ Rasters are computed on a coarse grid (`--bev-resolution`, 0.25 m) and views
 render the same extent on a fine grid (`--bev-ppm`, 10 px/m), drawing
 points, boxes, map and text directly at that resolution. Never draw on a
 raster and upscale it; that is what made the old views blurry.
+`planner_bev` is the one exception: a matplotlib figure (ego-centred crop
+plus the cost at 1/2/3 s) built for reading the planner, not for matching
+the other views' extent. It still never upscales.
 
 `visualize.py` computes per-frame products (points, occupancy, detections,
 LSS output, map background) once and shares them across views; a view is an
@@ -117,6 +120,7 @@ metrics.py       L2 / box collision / off-road, constant-velocity baseline
 planner.py       inference: NmpPlanner.plan(frame, lidar, map) -> PlanResult
 evaluate.py      validation metrics and the eval report
 train.py         CLI: cache / fit / eval
+render.py        planner_bev figure: scene + plan vs logged human, cost panels
 ```
 
 ```bash

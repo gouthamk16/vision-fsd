@@ -125,8 +125,8 @@ The last epoch is the honest number; the best epoch was picked on the same val s
   </tr>
   <tr>
     <td colspan="2" align="center">
-      <img src="results/nuscenes_planner_bev.jpg" width="50%"><br>
-      <sub>Neural motion planner - the chosen 3 s plan (magenta, dots every 0.5 s), 30 of the 1000 sampled trajectories it rejected (gray), the learned cost (bright = cheap), and detected vehicles (green) with their forecasts (yellow)</sub>
+      <img src="results/nuscenes_planner_bev.jpg" width="80%"><br>
+      <sub>Neural motion planner - left: the chosen 3 s plan (green) against what the human actually drove (orange, dashed), rejected samples (light blue) and detected vehicles with 3 s forecasts (blue); right: the learned cost the plan minimises at 1, 2 and 3 s (dark = preferred)</sub>
     </td>
   </tr>
   <tr>

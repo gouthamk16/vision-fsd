@@ -171,6 +171,14 @@ class NuScenesSceneLoader:
             raise IndexError(f"Sample index {start} is beyond scene length {len(samples)}")
         return samples[start:] if max_frames is None else samples[start:start + max_frames]
 
+    def future_ego_poses(self, sample_token: str, steps: int) -> list[Pose]:
+        """Global ego poses of the next `steps` keyframes; fewer near the end of the scene."""
+        poses, token = [], self.index.samples[sample_token]["next"]
+        while token and len(poses) < steps:
+            poses.append(self._ego_pose(self._keyframes[token][LIDAR_TOP]))
+            token = self.index.samples[token]["next"]
+        return poses
+
     def iter_scene_frames(
         self,
         scene_index: int = 0,

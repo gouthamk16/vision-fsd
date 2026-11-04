@@ -50,6 +50,7 @@ class _Context:
     planner: NmpPlanner | None = None
     # The planner's map input is needed even when the map background is off (--no-map).
     planner_map: NuScenesMapRenderer | None = None
+    loader: NuScenesSceneLoader | None = None
 
 
 class _Products:
@@ -86,6 +87,13 @@ def _lss_lidar(p: _Products, c: _Context) -> np.ndarray:
     return with_header(image, f"{p.frame.scene_name} | sample {p.frame.sample_index} | LSS (cyan) over LiDAR BEV")
 
 
+def _planner(p: _Products, c: _Context) -> np.ndarray:
+    result = c.planner.plan(p.frame, p.lidar, c.planner_map)
+    future = [pose.relative_to(p.frame.ego_pose) for pose in c.loader.future_ego_poses(p.frame.sample_token, c.planner.cfg.horizon)]
+    logged = np.array([[q.translation[0], q.translation[1], q.yaw] for q in future]) if future else None
+    return render_planner_bev(p.frame, p.points, result, c.planner.cfg.grid, c.map_renderer, logged)
+
+
 RENDERERS: dict[str, Callable[[_Products, _Context], np.ndarray]] = {
     "cameras": lambda p, c: render_contact_sheet(p.frame, c.tile_width),
     "lidar": lambda p, c: render_lidar_projection_sheet(p.frame, p.lidar, p.points, c.tile_width, c.max_depth, c.point_radius),
@@ -97,7 +105,7 @@ RENDERERS: dict[str, Callable[[_Products, _Context], np.ndarray]] = {
     "objects_bev": lambda p, c: render_fusion_bev(p.frame, p.points, p.detections, c.view, p.dark_map),
     "objects_cameras": lambda p, c: render_fusion_cameras(p.frame, p.detections, c.tile_width),
     "world_bev": lambda p, c: render_world_model_bev(c.world.step(p.frame, p.occupancy), c.raster, c.view, c.map_renderer),
-    "planner_bev": lambda p, c: render_planner_bev(p.frame, p.points, c.planner.plan(p.frame, p.lidar, c.planner_map), c.planner.cfg.grid, c.view, p.dark_map),
+    "planner_bev": _planner,
 }
 VIEWS = tuple(RENDERERS)
 
@@ -125,14 +133,15 @@ def _build_context(views: list[str], loader: NuScenesSceneLoader, opts: argparse
         ctx.detector = FrustumFusionDetector(opts.yolo_weights, opts.detector_device)
     if LSS_VIEWS & set(views):
         ctx.lss = LSSInference(opts.lss_weights, opts.lss_device)
-    if "planner_bev" in views:
-        ctx.planner = NmpPlanner(opts.nmp_weights)
-        ctx.planner_map = NuScenesMapRenderer(loader.dataroot)
     if not opts.no_map and MAP_VIEWS & set(views):
         try:
             ctx.map_renderer = NuScenesMapRenderer(loader.dataroot)
         except FileNotFoundError as exc:
             print(f"Map disabled: {exc}")
+    if "planner_bev" in views:
+        ctx.planner = NmpPlanner(opts.nmp_weights)
+        ctx.planner_map = ctx.map_renderer or NuScenesMapRenderer(loader.dataroot)
+        ctx.loader = loader
     return ctx
 
 
