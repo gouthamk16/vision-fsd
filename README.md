@@ -82,11 +82,13 @@ Trained 20 epochs on 139 nuScenes train scenes (4,396 samples), evaluated on the
 
 | method | L2 1/2/3 s (m) | collision 1/2/3 s (%) | off-road 3 s (%) |
 |---|---|---|---|
+| human driver (logged) | 0 / 0 / 0 | 0.00 / 0.00 / 0.00 | 0.00 |
 | constant velocity | 0.40 / 1.16 / 2.33 | 0.00 / 0.41 / 2.24 | 5.70 |
-| **NMP (ours)** | 0.47 / 1.57 / 3.44 | 0.00 / 0.00 / **0.61** | **0.10** |
+| **NMP, last epoch** | 0.47 / 1.59 / 3.49 | 0.00 / 0.00 / 1.12 | 0.00 |
+| NMP, best epoch by val collision (17) | 0.47 / 1.57 / 3.44 | 0.00 / 0.00 / 0.61 | 0.10 |
 | NMP reference ([Khurana et al., ECCV 2022](https://arxiv.org/abs/2210.01917), full val, no map) | 0.53 / 1.25 / 2.67 | 0.04 / 0.12 / 0.87 | - |
 
-It stays on the road and out of other cars far better than driving straight, and its collision rate is below the published reference. It is further from the human trajectory (L2) than the reference: the planning loss only asks the human path to be cheapest, and we train on a fifth of the data. Vehicle AP at 2 m within 50 m is 0.36. Implementation in [fsd/nmp/](fsd/nmp/).
+The last epoch is the honest number; the best epoch was picked on the same val split, so its collision rate is optimistic. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), and it travels 18 m in 3 s against the human's 19 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m within 50 m is 0.44. Implementation in [fsd/nmp/](fsd/nmp/).
 
 ### Results
 
@@ -124,7 +126,7 @@ It stays on the road and out of other cars far better than driving straight, and
   <tr>
     <td colspan="2" align="center">
       <img src="results/nuscenes_planner_bev.jpg" width="50%"><br>
-      <sub>Neural motion planner - learned cost (bright = cheap), 100 of the 1000 sampled trajectories (gray), the selected plan (green, dots every 0.5 s), and detected vehicles with forecasts (yellow)</sub>
+      <sub>Neural motion planner - the chosen 3 s plan (magenta, dots every 0.5 s), 30 of the 1000 sampled trajectories it rejected (gray), the learned cost (bright = cheap), and detected vehicles (green) with their forecasts (yellow)</sub>
     </td>
   </tr>
   <tr>
