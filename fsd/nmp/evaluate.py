@@ -84,27 +84,33 @@ def report(weights: Path, cache_dir: Path, split: str, cfg: NmpConfig) -> str:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = NeuralMotionPlanner(cfg).to(device)
     model.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True)["model"])
-    nmp, cv = PlanMetrics(), PlanMetrics()
-    scores, tps, errors, n_gt = [], [], [], 0
+    nmp, cv, expert = PlanMetrics(), PlanMetrics(), PlanMetrics()
+    scores, tps, errors, n_gt, travel = [], [], [], 0, []
     for batch, out, plans in _plans(model, make_loader(cache_dir, split, cfg, 4, 4, None, False), cfg):
         boxes, forecasts = decode_detections(out, cfg, AP_THRESHOLD)
         for b, plan in enumerate(plans):
             args = (batch["ego_future"][b], batch["boxes"][b], batch["box_valid"][b], batch["drivable"][b], cfg)
             nmp.add(plan, *args)
             cv.add(constant_velocity_plan(float(batch["v0"][b]), cfg), *args)
+            expert.add(batch["ego_future"][b], *args)
+            travel.append((np.hypot(*plan[-1, :2]), np.hypot(*batch["ego_future"][b][-1, :2])))
             s, t, e, n = _match(boxes[b], forecasts[b], batch["boxes"][b], batch["box_valid"][b], batch["box_class"][b], cfg)
             scores, tps, errors, n_gt = scores + s, tps + t, errors + e, n_gt + n
-    return _table(cv.summary(), nmp.summary(), average_precision(scores, tps, n_gt), np.array(errors).reshape(-1, 3))
+    rows = {"expert (logged)": expert.summary(), "CV baseline": cv.summary(), "NMP (ours)": nmp.summary()}
+    planned, logged = np.mean(travel, axis=0)
+    table = _table(rows, average_precision(scores, tps, n_gt), np.array(errors).reshape(-1, 3))
+    return f"{table}\nmean distance from start at 3 s: NMP {planned:.2f} m | expert {logged:.2f} m"
 
 
-def _table(cv: dict, nmp: dict, ap: float, errors: np.ndarray) -> str:
+def _table(rows: dict[str, dict], ap: float, errors: np.ndarray) -> str:
+    """Rows of PlanMetrics summaries; the expert row is the floor the metrics allow, not a competitor."""
     cols = [f"{m} {s}s" for m in ("L2 (m)", "coll (%)", "off-road (%)") for s in REPORT_SECONDS]
     lines = [f"| method | {' | '.join(cols)} |", "|---" * (len(cols) + 1) + "|"]
-    for name, row in (("CV baseline", cv), ("NMP (ours)", nmp)):
+    for name, row in rows.items():
         values = [row[f"{m}_{s}s"] for m in ("l2", "collision", "offroad") for s in REPORT_SECONDS]
         lines.append(f"| {name} | " + " | ".join(f"{v:.2f}" for v in values) + " |")
     ref = [*REFERENCE["l2"], *REFERENCE["collision"], *("-",) * 3]
     lines.append("| NMP ref (Khurana et al. ECCV'22, nuScenes-val, no map) | " + " | ".join(str(v) for v in ref) + " |")
     forecast = ", ".join(f"{s}s {np.nanmean(errors[:, i]):.2f} m" for i, s in enumerate(REPORT_SECONDS)) if len(errors) else "n/a"
-    lines += ["", f"samples: {int(nmp['samples'])} | vehicle AP @ {MATCH_DISTANCE_M:.0f} m within {MAX_RANGE_M:.0f} m: {ap:.3f} | forecast L2 of matched: {forecast}"]
+    lines += ["", f"samples: {int(rows['NMP (ours)']['samples'])} | vehicle AP @ {MATCH_DISTANCE_M:.0f} m within {MAX_RANGE_M:.0f} m: {ap:.3f} | forecast L2 of matched: {forecast}"]
     return "\n".join(lines)
