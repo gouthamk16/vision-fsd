@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pickle
 from collections import defaultdict
 from dataclasses import dataclass
@@ -85,7 +86,9 @@ def load_index(dataroot: Path, version: str) -> NuScenesIndex:
             "Extract at least one v1.0-trainval*_blobs part there."
         )
 
-    key = hashlib.sha1(f"{dataroot.resolve()}|{version}|{','.join(sorted(s['token'] for s in available))}".encode())
+    # The record fields are part of the key, so changing what is indexed rebuilds the cache.
+    scenes_key = ",".join(sorted(s["token"] for s in available))
+    key = hashlib.sha1(f"{dataroot.resolve()}|{version}|{_SAMPLE_DATA_FIELDS}|{_ANNOTATION_FIELDS}|{scenes_key}".encode())
     cache = CACHE_DIR / f"nuscenes-{version}-{key.hexdigest()[:12]}.pkl"
     if cache.exists():
         with cache.open("rb") as handle:
@@ -94,8 +97,11 @@ def load_index(dataroot: Path, version: str) -> NuScenesIndex:
     print(f"Indexing nuScenes metadata for {len(available)} scenes (one-time, a few minutes)...")
     index = _build_index(meta_dir, available, samples)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with cache.open("wb") as handle:
+    # Write then rename, so an interrupted first run cannot leave a truncated cache behind.
+    partial = cache.with_suffix(".partial")
+    with partial.open("wb") as handle:
         pickle.dump(index, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(partial, cache)
     return index
 
 

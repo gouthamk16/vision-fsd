@@ -9,10 +9,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from fsd.bev import BevGrid, canvas, fixed_point
+from fsd.bev import SHIFT, BevGrid, canvas, fixed_point
 from fsd.data import SurroundFrame
 
-_SHIFT = 4
 # (fill layers, line layers) drawn in order; BGR.
 _PALETTES = {
     "light": (
@@ -68,10 +67,10 @@ class NuScenesMapRenderer:
         if fill:
             for name, color in fills.items():
                 for contours in visible(name):
-                    cv2.fillPoly(image, contours, color, cv2.LINE_AA, _SHIFT)
+                    cv2.fillPoly(image, contours, color, cv2.LINE_AA, SHIFT)
         for name, color in lines.items():
             for (line,) in visible(name):
-                cv2.polylines(image, [line], False, color, 1, cv2.LINE_AA, _SHIFT)
+                cv2.polylines(image, [line], False, color, 1, cv2.LINE_AA, SHIFT)
 
     def _load(self, location: str) -> dict[str, _Layer]:
         if location not in self._layers:

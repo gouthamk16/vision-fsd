@@ -164,13 +164,12 @@ class NuScenesSceneLoader:
             raise ValueError("start and max_frames must be >= 0")
         samples = []
         token = scene["first_sample_token"]
-        while token and (max_frames is None or len(samples) < start + max_frames):
-            sample = self.index.samples[token]
-            samples.append(sample)
-            token = sample["next"]
-        if start >= len(samples) and samples:
-            raise IndexError(f"Sample index {start} is beyond scene length {scene['nbr_samples']}")
-        return samples[start:]
+        while token:
+            samples.append(self.index.samples[token])
+            token = samples[-1]["next"]
+        if start >= len(samples):
+            raise IndexError(f"Sample index {start} is beyond scene length {len(samples)}")
+        return samples[start:] if max_frames is None else samples[start:start + max_frames]
 
     def iter_scene_frames(
         self,

@@ -338,5 +338,5 @@ def render_lss_bev(
 
 def overlay_lss(image: np.ndarray, prob: np.ndarray, view: BevGrid, threshold: float = 0.35, alpha: float = 0.75) -> np.ndarray:
     """Blend the LSS vehicle mask (cyan) onto a BEV image rendered on `view`."""
-    weight = np.clip((resample(prob.astype(np.float32), LSS_GRID, view) - threshold) / (1.0 - threshold), 0.0, 1.0)
+    weight = np.clip((resample(prob.astype(np.float32), LSS_GRID, view) - threshold) / max(1.0 - threshold, 1e-6), 0.0, 1.0)
     return blend(image, (255, 180, 80), weight * alpha)

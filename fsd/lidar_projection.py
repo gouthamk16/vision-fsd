@@ -7,7 +7,7 @@ import numpy as np
 
 from fsd.contact_sheet import camera_sheet
 from fsd.data import CameraFrame, LidarFrame, Pose, SurroundFrame
-from fsd.draw import splat
+from fsd.draw import colorize, splat
 from fsd.ego_motion import EGO_FOOTPRINT
 
 # Returns off the ego body itself: the footprint plus a margin for mirrors and
@@ -69,8 +69,8 @@ def project_to_camera(
 
 
 def depth_to_bgr(depth: np.ndarray, max_depth: float = 80.0) -> np.ndarray:
-    normalized = (255.0 * (1.0 - np.clip(depth, 0.0, max_depth) / max_depth)).astype(np.uint8)
-    return cv2.applyColorMap(normalized.reshape((-1, 1)), cv2.COLORMAP_TURBO).reshape(-1, 3)
+    """Near returns red, far blue."""
+    return colorize(-depth, -max_depth, 0.0, cv2.COLORMAP_TURBO)
 
 
 def render_lidar_projection_sheet(

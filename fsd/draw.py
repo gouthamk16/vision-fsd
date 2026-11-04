@@ -20,6 +20,8 @@ def blend(image: np.ndarray, color, alpha: np.ndarray | float) -> np.ndarray:
 
 def colorize(values: np.ndarray, vmin: float, vmax: float, cmap: int) -> np.ndarray:
     """Map values to BGR with an OpenCV colormap; works on 1-D or 2-D arrays."""
+    if values.size == 0:  # cv2.applyColorMap returns None for empty input
+        return np.empty((*values.shape, 3), dtype=np.uint8)
     norm = np.clip((values - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
     colors = cv2.applyColorMap((norm * 255).astype(np.uint8).reshape(-1, 1), cmap)
     return colors.reshape(*values.shape, 3)

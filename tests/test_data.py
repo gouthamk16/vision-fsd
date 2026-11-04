@@ -2,6 +2,7 @@ import json
 import math
 
 import numpy as np
+import pytest
 
 from conftest import yaw_pose
 from fsd.data import Pose, _group_by_nearest, quaternion_to_rotation_matrix
@@ -38,3 +39,23 @@ def test_group_by_nearest_drops_targets_without_a_close_partner():
     other = [{"timestamp": t} for t in (5, 290)]
     groups = _group_by_nearest({"A": target, "B": other}, "A", tolerance_us=20)
     assert [g["B"]["timestamp"] for g in groups] == [5]
+
+
+def _loader_with_samples(n: int):
+    from types import SimpleNamespace
+
+    from fsd.data import NuScenesSceneLoader
+
+    tokens = [f"s{i}" for i in range(n)]
+    samples = {t: {"token": t, "next": tokens[i + 1] if i + 1 < n else ""} for i, t in enumerate(tokens)}
+    loader = NuScenesSceneLoader.__new__(NuScenesSceneLoader)
+    loader.index = SimpleNamespace(samples=samples)
+    return loader, {"first_sample_token": "s0"}
+
+
+def test_samples_slices_start_and_max_frames():
+    loader, scene = _loader_with_samples(3)
+    assert [s["token"] for s in loader.samples(scene, 1, 1)] == ["s1"]
+    assert loader.samples(scene, 2, 0) == []
+    with pytest.raises(IndexError, match="beyond scene length 3"):
+        loader.samples(scene, 3)

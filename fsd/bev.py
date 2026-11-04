@@ -20,7 +20,7 @@ from fsd.draw import FONT, colorize, splat, with_header
 from fsd.ego_motion import EGO_FOOTPRINT
 
 DARK_CANVAS = (20, 20, 20)
-_SHIFT = 4  # cv2 fixed-point bits: sub-pixel accurate anti-aliased geometry
+SHIFT = 4  # cv2 fixed-point bits: sub-pixel accurate anti-aliased geometry
 
 
 @dataclass(frozen=True)
@@ -65,15 +65,15 @@ def resample(raster: np.ndarray, source: BevGrid, target: BevGrid, interpolation
 
 
 def fixed_point(grid: BevGrid, xy: np.ndarray) -> np.ndarray:
-    return np.round(grid.to_pixels(xy) * (1 << _SHIFT)).astype(np.int32).reshape(-1, 1, 2)
+    return np.round(grid.to_pixels(xy) * (1 << SHIFT)).astype(np.int32).reshape(-1, 1, 2)
 
 
 def draw_polygon(image: np.ndarray, grid: BevGrid, xy: np.ndarray, color, thickness: int = 1, fill: bool = False) -> None:
     pts = fixed_point(grid, xy)
     if fill:
-        cv2.fillPoly(image, [pts], color, cv2.LINE_AA, _SHIFT)
+        cv2.fillPoly(image, [pts], color, cv2.LINE_AA, SHIFT)
     else:
-        cv2.polylines(image, [pts], True, color, thickness, cv2.LINE_AA, _SHIFT)
+        cv2.polylines(image, [pts], True, color, thickness, cv2.LINE_AA, SHIFT)
 
 
 def draw_arrow(image: np.ndarray, grid: BevGrid, start_xy, end_xy, color, thickness: int = 1) -> None:

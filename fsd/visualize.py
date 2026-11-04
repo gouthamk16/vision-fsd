@@ -85,7 +85,7 @@ RENDERERS: dict[str, Callable[[_Products, _Context], np.ndarray]] = {
     "lss_bev": lambda p, c: render_lss_bev(p.frame, p.lss, c.view, c.map_renderer, c.lss_threshold),
     "lss_lidar_bev": _lss_lidar,
     "occupancy_bev": lambda p, c: render_occupancy_bev(p.frame, p.occupancy, c.raster, c.view),
-    "height_bev": lambda p, c: render_bev_channels(p.frame, compute_bev_height_channels(p.points, c.raster), c.raster.with_resolution(0.2)),
+    "height_bev": lambda p, c: render_bev_channels(p.frame, compute_bev_height_channels(p.points, c.raster), c.view.with_resolution(c.view.resolution * 2)),
     "objects_bev": lambda p, c: render_fusion_bev(p.frame, p.points, p.detections, c.view, p.dark_map),
     "objects_cameras": lambda p, c: render_fusion_cameras(p.frame, p.detections, c.tile_width),
     "world_bev": lambda p, c: render_world_model_bev(c.world.step(p.frame, p.occupancy), c.raster, c.view, c.map_renderer),

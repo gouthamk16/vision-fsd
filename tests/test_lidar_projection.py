@@ -21,3 +21,11 @@ def test_project_to_camera_keeps_indices_of_visible_points():
     uv, depth, kept = project_to_camera(points, yaw_pose(), camera, (100, 100, 3))
     assert kept.tolist() == [0]
     assert np.allclose(uv[0], [50.0, 50.0]) and np.isclose(depth[0], 10.0)
+
+
+def test_depth_colours_handle_empty_input_and_put_near_points_at_the_hot_end():
+    from fsd.lidar_projection import depth_to_bgr
+
+    assert depth_to_bgr(np.empty(0)).shape == (0, 3)
+    near, far = depth_to_bgr(np.array([0.0, 80.0]))
+    assert near[2] > near[0] and far[0] > far[2]  # BGR: near is red, far is blue
