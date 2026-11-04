@@ -31,8 +31,9 @@ pip install -r requirements.txt
 `fsd/centerpoint_export.py` is the one exception: it needs mmdet3d +
 nuscenes-devkit against torch 2.1/cu121, which conflicts with the pins above,
 so it runs in a separate `.venv-mmdet3d`. It is not covered by
-`requirements.txt` and cannot be imported from the main env. It is also the
-one module with its own CLI, because it cannot run in the main env.
+`requirements.txt` and cannot be imported from the main env. It is one of two
+modules with their own CLI, because it cannot run in the main env; the other
+is `fsd/nmp/train.py`, because training is not a view.
 
 nuScenes data is read from `C:/nuscenes`, override with `NUSCENES_ROOT`. The
 flat devkit layout is expected (`samples/`, `sweeps/`, `maps/`,
@@ -90,11 +91,45 @@ Lift-Splat-Shoot), `fusion_detect.py` (camera+LiDAR frustum fusion),
 `object_detection.py` (GT/prediction boxes and drawing).
 
 Views: `cameras`, `lidar`, `bev`, `lss_bev`, `lss_lidar_bev`, `occupancy_bev`,
-`height_bev`, `objects_bev`, `objects_cameras`, `world_bev`, `all` (LSS views
-are included only with `--lss-weights`).
+`height_bev`, `objects_bev`, `objects_cameras`, `world_bev`, `planner_bev`,
+`all` (LSS views need `--lss-weights`, `planner_bev` needs `--nmp-weights`;
+`all` skips whichever is missing).
 
-There is no motion planner at the moment. The previous lattice planner was
-removed; a learned NMP-style planner is planned to replace it.
+## Architecture — `fsd/nmp/` (neural motion planner)
+
+NMP (Zeng et al., CVPR 2019): one conv net over 10 LiDAR sweeps + 8 HD-map
+channels outputs vehicle detections with 3 s forecasts and a cost volume (one
+cost map per future 0.5 s step); planning picks the cheapest of 1000 sampled
+trajectories. Paper summary: `knowledge/summary_neural_motion_planner.md`;
+plan and rulings: `docs/superpowers/plans/2026-11-04-nmp-planner.md`.
+
+It consumes `data`, `lidar_projection`, `nuscenes_map` and `object_detection`;
+nothing imports it except `visualize` (the `planner_bev` view).
+
+```
+config.py        NmpConfig: grid (140.8 x 80 m @ 0.2 m), sweeps, horizon, losses
+trajectories.py  straight / circle / clothoid sampler (curvature linear in arc length)
+samples.py       keyframe -> NmpSample (sparse voxels, map masks, ego future, boxes)
+dataset.py       densify cached samples, rasterise future obstacles, DataLoader
+model.py         PIXOR backbone + detection/forecast head + cost-volume head
+losses.py        focal + smooth-L1 perception loss, max-margin planning loss
+metrics.py       L2 / box collision / off-road, constant-velocity baseline
+planner.py       inference: NmpPlanner.plan(frame, lidar, map) -> PlanResult
+evaluate.py      validation metrics and the eval report
+train.py         CLI: cache / fit / eval
+```
+
+```bash
+python -m fsd.nmp.train cache --split val      # ~2 min, ~1k samples
+python -m fsd.nmp.train cache --split train    # ~9 min, ~4.4k samples
+python -m fsd.nmp.train fit                    # 20 epochs, ~8.5 min each on an 8 GB GPU
+python -m fsd.nmp.train eval --weights checkpoints/nmp/best.pt
+python -m fsd.visualize --view planner_bev --nmp-weights checkpoints/nmp/best.pt --scene-name scene-0003 --save
+```
+
+The val split is the official nuScenes `val` list (`fsd/nmp/val_scenes.txt`);
+train is every other available scene. The cache lives in
+`~/.cache/vision-fsd/nmp/`, checkpoints in `checkpoints/nmp/` (gitignored).
 
 ## Architecture — `monocular_vision/` (legacy)
 
@@ -122,7 +157,9 @@ verbosity (default INFO).
 ## Tests
 
 `pytest tests/` covers the data layer, BEV geometry, occupancy, tracking,
-detection geometry, the map renderer and the visualizer's view selection.
+detection geometry, the map renderer, the visualizer's view selection, and
+the NMP sampler, samples, dataset, model, losses, metrics and a CPU overfit
+run of training.
 There is no linter or CI configured.
 
 Tests are pure-Python and need neither a GPU nor the nuScenes dataset. Changes
