@@ -55,6 +55,7 @@ class NmpDataset(Dataset):
             "boxes": torch.from_numpy(sample.boxes),
             "box_valid": torch.from_numpy(sample.box_valid),
             "box_class": torch.from_numpy(sample.box_class.astype(np.int64)),
+            "box_points": torch.from_numpy(sample.box_points.astype(np.int64)),
             "obstacles": torch.from_numpy(obstacle_masks(sample, self.cfg)),
             "drivable": torch.from_numpy(sample.map_masks[0].astype(bool)),
         }
@@ -64,7 +65,7 @@ def collate(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     """Stack a batch, padding the per-sample box tables to the largest K (padding is invalid)."""
     k = max(item["boxes"].shape[0] for item in items)
     batch = {key: torch.stack([item[key] for item in items]) for key in items[0] if not key.startswith("box")}
-    for key in ("boxes", "box_valid", "box_class"):
+    for key in ("boxes", "box_valid", "box_class", "box_points"):
         padded = []
         for item in items:
             pad = k - item[key].shape[0]

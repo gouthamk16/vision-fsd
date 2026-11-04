@@ -19,7 +19,7 @@ def _write_cache(root, rng):
             masks = np.zeros((8, h, w), np.uint8)
             masks[0] = 1  # all drivable: only the max-margin term shapes the cost
             sample = NmpSample(f"s{i}", "scene", voxels, masks, future, 2.0, 0.0,
-                               np.zeros((0, 7, 5), np.float32), np.zeros((0, 7), bool), np.zeros(0, np.int8))
+                               np.zeros((0, 7, 5), np.float32), np.zeros((0, 7), bool), np.zeros(0, np.int8), np.zeros(0, np.int32))
             save_sample(sample, root / split / f"s{i}.npz")
 
 

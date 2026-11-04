@@ -46,11 +46,16 @@ def evaluate(model: NeuralMotionPlanner, loader, cfg: NmpConfig) -> dict[str, fl
     return metrics.summary()
 
 
-def _match(boxes, forecasts, gt_boxes, gt_valid, gt_class, cfg: NmpConfig):
-    """Greedy distance matching at step 0: (scores, true-positive flags, forecast errors (n, 3), n_gt)."""
+def _match(boxes, forecasts, gt_boxes, gt_valid, gt_class, gt_points, cfg: NmpConfig):
+    """Greedy distance matching at step 0: (scores, true-positive flags, forecast errors (n, 3), n_gt).
+
+    Like the nuScenes detection eval, ground truth the sensor never saw (no LiDAR points) is not a target,
+    and neither is ground truth outside the model's grid.
+    """
     detect = [CLASS_NAMES.index(c) for c in cfg.det_classes]
     near = np.hypot(gt_boxes[:, 0, 0], gt_boxes[:, 0, 1]) <= MAX_RANGE_M
-    gt_rows = np.flatnonzero(gt_valid[:, 0] & np.isin(gt_class, detect) & near)
+    on_grid = cfg.grid.cells(gt_boxes[:, 0, :2])[2]
+    gt_rows = np.flatnonzero(gt_valid[:, 0] & np.isin(gt_class, detect) & near & on_grid & (gt_points > 0))
     free = set(gt_rows.tolist())
     scores, tps, errors = [], [], []
     for i in np.argsort([-b.score for b in boxes]):
@@ -94,7 +99,7 @@ def report(weights: Path, cache_dir: Path, split: str, cfg: NmpConfig) -> str:
             cv.add(constant_velocity_plan(float(batch["v0"][b]), cfg), *args)
             expert.add(batch["ego_future"][b], *args)
             travel.append((np.hypot(*plan[-1, :2]), np.hypot(*batch["ego_future"][b][-1, :2])))
-            s, t, e, n = _match(boxes[b], forecasts[b], batch["boxes"][b], batch["box_valid"][b], batch["box_class"][b], cfg)
+            s, t, e, n = _match(boxes[b], forecasts[b], batch["boxes"][b], batch["box_valid"][b], batch["box_class"][b], batch["box_points"][b], cfg)
             scores, tps, errors, n_gt = scores + s, tps + t, errors + e, n_gt + n
     rows = {"expert (logged)": expert.summary(), "CV baseline": cv.summary(), "NMP (ours)": nmp.summary()}
     planned, logged = np.mean(travel, axis=0)

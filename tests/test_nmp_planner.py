@@ -97,7 +97,7 @@ def test_match_ignores_vehicles_beyond_eval_range():
     forecasts = np.zeros((2, T + 1, 3), np.float32)
     forecasts[0, :, 0], forecasts[1, :, 0] = 10.0, 60.0
     dets = [Box3D("car", np.array([x, 0.0, 0.8]), np.array([1.9, 4.6, 1.6]), 0.0, 0.9) for x in (10.0, 60.0)]
-    scores, tps, _, n_gt = _match(dets, forecasts, gt, np.ones((2, T + 1), bool), np.array([car, car]), CFG)
+    scores, tps, _, n_gt = _match(dets, forecasts, gt, np.ones((2, T + 1), bool), np.array([car, car]), np.array([9, 9]), NmpConfig())
     assert n_gt == 1 and scores == [0.9] and tps == [True]
 
 
@@ -110,3 +110,13 @@ def test_decode_detections_merges_tied_cells_of_one_vehicle():
     reg[0, 5::6] = 1.0
     boxes, _ = decode_detections(NmpOutput(cls, reg, torch.zeros(1, T, *CFG.grid.shape)), CFG)
     assert len(boxes[0]) == 2
+
+
+def test_match_ignores_vehicles_without_lidar_points_or_outside_the_grid():
+    car = CLASS_NAMES.index(CFG.det_classes[0])
+    gt = np.zeros((3, T + 1, 5), np.float32)
+    gt[:, :, 0] = 3.0
+    gt[2, :, 1] = 4.0  # CFG's grid spans y = ±4.8 m; this one sits inside
+    gt[1, :, 1] = 6.0  # and this one outside it
+    scores, tps, _, n_gt = _match([], np.zeros((0, T + 1, 3)), gt, np.ones((3, T + 1), bool), np.full(3, car), np.array([0, 9, 9]), CFG)
+    assert n_gt == 1
