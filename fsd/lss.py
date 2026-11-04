@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cv2
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -22,30 +21,20 @@ from efficientnet_pytorch import EfficientNet
 from torch import nn
 from torchvision.models.resnet import resnet18
 
+from fsd.bev import BevGrid, canvas, draw_ego, draw_metric_grid, resample
 from fsd.data import CAMERA_CHANNELS, SurroundFrame
-from fsd.lidar_projection import quaternion_to_rotation_matrix
+from fsd.draw import blend, with_header
+from fsd.nuscenes_map import NuScenesMapRenderer
 
-
-# nuScenes camera order LSS was trained on (same as ours).
-LSS_CAMS = list(CAMERA_CHANNELS)
-
-DEFAULT_GRID_CONF = {
+# The released checkpoint's configuration (src/explore.py defaults upstream).
+GRID_CONF = {
     "xbound": [-50.0, 50.0, 0.5],
     "ybound": [-50.0, 50.0, 0.5],
     "zbound": [-10.0, 10.0, 20.0],
     "dbound": [4.0, 45.0, 1.0],
 }
-DEFAULT_DATA_AUG_CONF = {
-    "resize_lim": (0.193, 0.225),
-    "final_dim": (128, 352),
-    "rot_lim": (-5.4, 5.4),
-    "H": 900,
-    "W": 1600,
-    "rand_flip": True,
-    "bot_pct_lim": (0.0, 0.22),
-    "cams": LSS_CAMS,
-    "Ncams": 5,
-}
+DATA_AUG_CONF = {"final_dim": (128, 352), "H": 900, "W": 1600, "bot_pct_lim": (0.0, 0.22)}
+LSS_GRID = BevGrid((-50.0, 50.0), (-50.0, 50.0), 0.5)
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -56,15 +45,6 @@ def gen_dx_bx(xbound, ybound, zbound):
     bx = torch.Tensor([row[0] + row[2] / 2.0 for row in [xbound, ybound, zbound]])
     nx = torch.LongTensor([(row[1] - row[0]) / row[2] for row in [xbound, ybound, zbound]])
     return dx, bx, nx
-
-
-def cumsum_trick(x, geom_feats, ranks):
-    x = x.cumsum(0)
-    kept = torch.ones(x.shape[0], device=x.device, dtype=torch.bool)
-    kept[:-1] = ranks[1:] != ranks[:-1]
-    x, geom_feats = x[kept], geom_feats[kept]
-    x = torch.cat((x[:1], x[1:] - x[:-1]))
-    return x, geom_feats
 
 
 class QuickCumsum(torch.autograd.Function):
@@ -107,16 +87,12 @@ class Up(nn.Module):
 
 
 class CamEncode(nn.Module):
-    def __init__(self, D, C, downsample, pretrained_trunk: bool = False):
+    def __init__(self, D, C):
         super().__init__()
         self.D = D
         self.C = C
-        # Skip downloading EfficientNet ImageNet weights when we plan to load
-        # a full LSS checkpoint right after.
-        if pretrained_trunk:
-            self.trunk = EfficientNet.from_pretrained("efficientnet-b0")
-        else:
-            self.trunk = EfficientNet.from_name("efficientnet-b0")
+        # Architecture only: the full LSS checkpoint is loaded right after.
+        self.trunk = EfficientNet.from_name("efficientnet-b0")
         self.up1 = Up(320 + 112, 512)
         self.depthnet = nn.Conv2d(512, self.D + self.C, kernel_size=1, padding=0)
 
@@ -178,7 +154,7 @@ class BevEncode(nn.Module):
 
 
 class LiftSplatShoot(nn.Module):
-    def __init__(self, grid_conf, data_aug_conf, outC, pretrained_trunk: bool = False):
+    def __init__(self, grid_conf, data_aug_conf, outC):
         super().__init__()
         self.grid_conf = grid_conf
         self.data_aug_conf = data_aug_conf
@@ -192,9 +168,8 @@ class LiftSplatShoot(nn.Module):
         self.camC = 64
         self.frustum = self.create_frustum()
         self.D, _, _, _ = self.frustum.shape
-        self.camencode = CamEncode(self.D, self.camC, self.downsample, pretrained_trunk=pretrained_trunk)
+        self.camencode = CamEncode(self.D, self.camC)
         self.bevencode = BevEncode(inC=self.camC, outC=outC)
-        self.use_quickcumsum = True
 
     def create_frustum(self):
         ogfH, ogfW = self.data_aug_conf["final_dim"]
@@ -257,10 +232,7 @@ class LiftSplatShoot(nn.Module):
         )
         sorts = ranks.argsort()
         x, geom_feats, ranks = x[sorts], geom_feats[sorts], ranks[sorts]
-        if not self.use_quickcumsum:
-            x, geom_feats = cumsum_trick(x, geom_feats, ranks)
-        else:
-            x, geom_feats = QuickCumsum.apply(x, geom_feats, ranks)
+        x, geom_feats = QuickCumsum.apply(x, geom_feats, ranks)
         final = torch.zeros((B, C, self.nx[2], self.nx[0], self.nx[1]), device=x.device)
         final[geom_feats[:, 3], :, geom_feats[:, 2], geom_feats[:, 0], geom_feats[:, 1]] = x
         return torch.cat(final.unbind(dim=2), 1)
@@ -307,239 +279,64 @@ def _normalize_image(image: Image.Image) -> torch.Tensor:
 class LSSInference:
     """Run the pretrained LSS BEV vehicle-segmentation model on `SurroundFrame`s."""
 
-    def __init__(
-        self,
-        weights_path: str | Path,
-        device: str | torch.device | None = None,
-        grid_conf: dict | None = None,
-        data_aug_conf: dict | None = None,
-        out_channels: int = 1,
-    ):
-        self.weights_path = Path(weights_path)
-        if not self.weights_path.exists():
-            raise FileNotFoundError(f"LSS weights not found: {self.weights_path}")
-
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
-
-        self.grid_conf = grid_conf or DEFAULT_GRID_CONF
-        self.data_aug_conf = data_aug_conf or DEFAULT_DATA_AUG_CONF
-
-        self.model = LiftSplatShoot(self.grid_conf, self.data_aug_conf, outC=out_channels)
-        state = torch.load(self.weights_path, map_location="cpu", weights_only=True)
-        self.model.load_state_dict(state)
+    def __init__(self, weights_path: str | Path, device: str | torch.device | None = None):
+        weights_path = Path(weights_path)
+        if not weights_path.exists():
+            raise FileNotFoundError(f"LSS weights not found: {weights_path}")
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.model = LiftSplatShoot(GRID_CONF, DATA_AUG_CONF, outC=1)
+        self.model.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
         self.model.to(self.device).eval()
 
-        nx = self.model.nx.detach().cpu().numpy()
-        self.bev_x_cells = int(nx[0])
-        self.bev_y_cells = int(nx[1])
-
-    def _per_camera_tensors(self, frame: SurroundFrame):
+    def _inputs(self, frame: SurroundFrame) -> list[torch.Tensor]:
         imgs, rots, trans, intrins, post_rots, post_trans = [], [], [], [], [], []
-        for channel in LSS_CAMS:
+        for channel in CAMERA_CHANNELS:
             camera = frame.cameras[channel]
-            image = Image.open(camera.image_path).convert("RGB")
-            image, post_rot, post_tran = _eval_image_transform(image, self.data_aug_conf)
-
-            intrinsic = torch.tensor(camera.camera_intrinsic, dtype=torch.float32)
-            rot = torch.tensor(
-                quaternion_to_rotation_matrix(camera.calibrated_sensor["rotation"]),
-                dtype=torch.float32,
-            )
-            tran = torch.tensor(camera.calibrated_sensor["translation"], dtype=torch.float32)
-
+            image, post_rot, post_tran = _eval_image_transform(Image.open(camera.image_path).convert("RGB"), DATA_AUG_CONF)
             imgs.append(_normalize_image(image))
-            intrins.append(intrinsic)
-            rots.append(rot)
-            trans.append(tran)
+            rots.append(torch.tensor(camera.calibration.rotation, dtype=torch.float32))
+            trans.append(torch.tensor(camera.calibration.translation, dtype=torch.float32))
+            intrins.append(torch.tensor(camera.intrinsic, dtype=torch.float32))
             post_rots.append(post_rot.float())
             post_trans.append(post_tran.float())
-
-        return (
-            torch.stack(imgs).unsqueeze(0),
-            torch.stack(rots).unsqueeze(0),
-            torch.stack(trans).unsqueeze(0),
-            torch.stack(intrins).unsqueeze(0),
-            torch.stack(post_rots).unsqueeze(0),
-            torch.stack(post_trans).unsqueeze(0),
-        )
+        return [torch.stack(t).unsqueeze(0).to(self.device) for t in (imgs, rots, trans, intrins, post_rots, post_trans)]
 
     @torch.inference_mode()
     def infer(self, frame: SurroundFrame) -> np.ndarray:
-        """Return a (X, Y) numpy array of sigmoided vehicle-segmentation probs.
-
-        Indexing follows LSS's grid: index 0 in X corresponds to xbound[0]
-        (rear of ego), index 0 in Y to ybound[0] (right of ego).
-        """
-        imgs, rots, trans, intrins, post_rots, post_trans = self._per_camera_tensors(frame)
-        out = self.model(
-            imgs.to(self.device),
-            rots.to(self.device),
-            trans.to(self.device),
-            intrins.to(self.device),
-            post_rots.to(self.device),
-            post_trans.to(self.device),
-        )
-        return out.sigmoid()[0, 0].detach().cpu().numpy()
+        """Vehicle probability on `LSS_GRID` in our BEV convention (row 0 = forward edge)."""
+        prob = self.model(*self._inputs(frame)).sigmoid()[0, 0].cpu().numpy()
+        # LSS indexes (x, y) from (x_min, y_min): flip both axes to put +x up and +y left.
+        return np.flip(prob, axis=(0, 1)).copy()
 
 
-def _lss_grid_to_bev_pixels(prob_map: np.ndarray) -> np.ndarray:
-    """Reorient a (X, Y) LSS grid so row=0 is the top (forward) of our BEV."""
-    return np.flip(prob_map, axis=(0, 1)).copy()
-
-
-def _blues_colormap(prob: np.ndarray) -> np.ndarray:
-    """matplotlib-Blues lookalike — white at 0, deep blue at 1, BGR uint8."""
+def _blues(prob: np.ndarray) -> np.ndarray:
+    """matplotlib-Blues lookalike, white at 0 to deep blue at 1, BGR."""
     t = np.clip(prob, 0.0, 1.0)[..., None]
-    white = np.array([255, 255, 255], dtype=np.float32)
-    deep_blue = np.array([130, 50, 8], dtype=np.float32)  # BGR
-    rgb = white * (1 - t) + deep_blue * t
-    return rgb.astype(np.uint8)
-
-
-def _draw_metric_grid(canvas: np.ndarray, x_range, y_range, resolution, dark: bool) -> None:
-    x_min, x_max = x_range
-    y_min, y_max = y_range
-    h, w = canvas.shape[:2]
-    if dark:
-        minor, major = (60, 60, 60), (110, 110, 110)
-    else:
-        minor, major = (220, 220, 220), (170, 170, 170)
-    for x in range(int(np.ceil(x_min / 10) * 10), int(x_max) + 1, 10):
-        row = int((x_max - x) / resolution)
-        if 0 <= row < h:
-            cv2.line(canvas, (0, row), (w - 1, row), major if x == 0 else minor, 1)
-            cv2.putText(canvas, f"{x}m", (6, max(14, row - 3)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, major if x == 0 else minor, 1)
-    for y in range(int(np.ceil(y_min / 10) * 10), int(y_max) + 1, 10):
-        col = int((y_max - y) / resolution)
-        if 0 <= col < w:
-            cv2.line(canvas, (col, 0), (col, h - 1), major if y == 0 else minor, 1)
-            cv2.putText(canvas, f"{y}m", (max(2, col + 3), h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.35, major if y == 0 else minor, 1)
-
-
-def _draw_ego_marker(canvas: np.ndarray, x_range, y_range, resolution, color, outline) -> None:
-    _, x_max = x_range
-    _, y_max = y_range
-    row = int(x_max / resolution)
-    col = int(y_max / resolution)
-    car_w = max(6, int(2.0 / resolution))
-    car_l = max(12, int(4.5 / resolution))
-    cv2.rectangle(canvas, (col - car_w // 2, row - car_l // 2), (col + car_w // 2, row + car_l // 2), color, -1)
-    cv2.rectangle(canvas, (col - car_w // 2, row - car_l // 2), (col + car_w // 2, row + car_l // 2), outline, 1)
-    cv2.arrowedLine(canvas, (col, row), (col, row - car_l), outline, 2, tipLength=0.35)
+    return (np.array([255, 255, 255], np.float32) * (1 - t) + np.array([130, 50, 8], np.float32) * t).astype(np.uint8)
 
 
 def render_lss_bev(
     frame: SurroundFrame,
-    prob_map: np.ndarray,
-    grid_conf: dict | None = None,
-    scale: int = 4,
+    prob: np.ndarray,
+    view: BevGrid,
+    map_renderer: NuScenesMapRenderer | None = None,
     threshold: float = 0.4,
-    style: str = "paper",
-    map_background: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Render the LSS BEV vehicle-segmentation output.
-
-    `style="paper"` mirrors the original LSS visualization (white background,
-    Blues colormap). `style="dark"` blends the prob map onto a dark BEV canvas
-    matching `render_lidar_bev`. Pass `map_background` to use a nuScenes HD-map
-    render as the backdrop (like the original LSS paper figure).
-    """
-    grid_conf = grid_conf or DEFAULT_GRID_CONF
-    x_min, x_max, x_res = grid_conf["xbound"]
-    y_min, y_max, y_res = grid_conf["ybound"]
-
-    grid = _lss_grid_to_bev_pixels(prob_map).astype(np.float32)
-    native_h, native_w = grid.shape
-    out_h, out_w = native_h * scale, native_w * scale
-    grid_up = cv2.resize(grid, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-
-    if map_background is not None:
-        if map_background.shape[:2] != (out_h, out_w):
-            map_background = cv2.resize(map_background, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-        canvas = map_background.copy()
-        dark = False
-    else:
-        dark = style != "paper"
-        bg = 22 if dark else 248
-        canvas = np.full((out_h, out_w, 3), bg, dtype=np.uint8)
-    _draw_metric_grid(canvas, (x_min, x_max), (y_min, y_max), x_res / scale, dark=dark)
-
-    if style == "paper" or map_background is not None:
-        heat = _blues_colormap(grid_up)
-        alpha = np.clip(grid_up * 1.4, 0.0, 1.0)[..., None]
-        canvas = (canvas.astype(np.float32) * (1 - alpha) + heat.astype(np.float32) * alpha).astype(np.uint8)
-    else:
-        heat = cv2.applyColorMap((np.clip(grid_up, 0.0, 1.0) * 255).astype(np.uint8), cv2.COLORMAP_OCEAN)
-        alpha = np.clip((grid_up - 0.05) / 0.95, 0.0, 1.0)[..., None]
-        canvas = (canvas.astype(np.float32) * (1 - alpha) + heat.astype(np.float32) * alpha).astype(np.uint8)
-
-    ego_fill = (118, 185, 0) if (style == "paper" or map_background is not None) else (220, 220, 240)
-    ego_outline = (60, 100, 0) if (style == "paper" or map_background is not None) else (90, 90, 130)
-    _draw_ego_marker(canvas, (x_min, x_max), (y_min, y_max), x_res / scale, ego_fill, ego_outline)
-
-    header_h = 58
-    paper_like = style == "paper" or map_background is not None
-    text_color = (40, 40, 40) if paper_like else (245, 245, 245)
-    sub_color = (80, 80, 150) if paper_like else (190, 220, 255)
-    header_bg = 240 if paper_like else 18
-    output = np.full((header_h + out_h, out_w, 3), header_bg, dtype=np.uint8)
-    output[header_h:, :] = canvas
-    title = f"{frame.scene_name} | sample {frame.sample_index} | LSS BEV (vehicle seg)"
-    stats = f"mean={float(prob_map.mean()):.3f} | max={float(prob_map.max()):.3f} | thr={threshold:.2f}"
-    cv2.putText(output, title, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.56, text_color, 1, cv2.LINE_AA)
-    cv2.putText(output, stats, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.46, sub_color, 1, cv2.LINE_AA)
-    return output
-
-
-def overlay_lss_on_lidar_bev(
-    lidar_bev_image: np.ndarray,
-    prob_map: np.ndarray,
-    lidar_resolution: float,
-    lidar_scale: int,
-    grid_conf: dict | None = None,
-    header_h: int = 58,
-    threshold: float = 0.35,
-    alpha: float = 0.75,
-) -> np.ndarray:
-    """Blend the LSS vehicle BEV mask on top of an existing LiDAR BEV render.
-
-    `lidar_resolution` and `lidar_scale` must match the values used to render
-    `lidar_bev_image` — they control how the 200x200 LSS grid is resampled
-    onto the LiDAR canvas. Without these the overlay drifts (the bug in the
-    first cut of this view).
-    """
-    grid_conf = grid_conf or DEFAULT_GRID_CONF
-    x_min, x_max, _ = grid_conf["xbound"]
-    y_min, y_max, _ = grid_conf["ybound"]
-
-    lidar_grid_h = int(round((x_max - x_min) / lidar_resolution)) * lidar_scale
-    lidar_grid_w = int(round((y_max - y_min) / lidar_resolution)) * lidar_scale
-    scaled_header = header_h * lidar_scale
-
-    grid = _lss_grid_to_bev_pixels(prob_map).astype(np.float32)
-    grid = cv2.resize(grid, (lidar_grid_w, lidar_grid_h), interpolation=cv2.INTER_LINEAR)
-
-    out = lidar_bev_image.copy()
-    band = out[scaled_header : scaled_header + lidar_grid_h, :lidar_grid_w]
-    if band.shape[:2] != grid.shape:
-        return out
-
-    weight = np.clip((grid - threshold) / max(1.0 - threshold, 1e-6), 0.0, 1.0) * alpha
-    weight = weight[..., None]
-    overlay_color = np.array([255, 180, 80], dtype=np.float32)  # BGR — bright cyan-blue
-    blended = band.astype(np.float32) * (1 - weight) + overlay_color * weight
-    out[scaled_header : scaled_header + lidar_grid_h, :lidar_grid_w] = blended.astype(np.uint8)
-
-    cv2.putText(
-        out,
-        "LSS vehicle seg (cyan)",
-        (10, scaled_header + 22),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (255, 220, 180),
-        1,
-        cv2.LINE_AA,
+    """Paper-style render: Blues vehicle probability over the HD map."""
+    image = map_renderer.render(frame, view) if map_renderer else canvas(view, (248, 248, 248))
+    draw_metric_grid(image, view, dark=False)
+    up = resample(prob.astype(np.float32), LSS_GRID, view)
+    image = blend(image, _blues(up), np.clip(up * 1.4, 0.0, 1.0))
+    draw_ego(image, view, fill=(118, 185, 0), outline=(60, 100, 0))
+    return with_header(
+        image,
+        f"{frame.scene_name} | sample {frame.sample_index} | LSS camera-only BEV (vehicle seg)",
+        f"mean={float(prob.mean()):.3f} | max={float(prob.max()):.3f} | thr={threshold:.2f}",
+        dark=False,
     )
-    return out
+
+
+def overlay_lss(image: np.ndarray, prob: np.ndarray, view: BevGrid, threshold: float = 0.35, alpha: float = 0.75) -> np.ndarray:
+    """Blend the LSS vehicle mask (cyan) onto a BEV image rendered on `view`."""
+    weight = np.clip((resample(prob.astype(np.float32), LSS_GRID, view) - threshold) / (1.0 - threshold), 0.0, 1.0)
+    return blend(image, (255, 180, 80), weight * alpha)

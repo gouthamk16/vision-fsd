@@ -27,8 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from fsd.data import NuScenesSceneLoader
-from fsd.lidar_projection import quaternion_to_rotation_matrix
+from fsd.data import NuScenesSceneLoader, Pose
 
 
 # nuScenes class order used by the CenterPoint nuScenes configs.
@@ -85,8 +84,7 @@ def _aggregate_sweeps(nusc, sample, nsweeps: int, min_distance: float = 1.0) -> 
 
 def _boxes_to_ego_records(pred, ref_cs: dict, score_threshold: float) -> list[dict]:
     """Convert LiDAR-sensor-frame CenterPoint boxes to ego-frame records."""
-    rot_cs = quaternion_to_rotation_matrix(ref_cs["rotation"])
-    trans_cs = np.asarray(ref_cs["translation"], dtype=np.float64)
+    sensor_to_ego = Pose.from_record(ref_cs)
 
     centers = pred.bboxes_3d.gravity_center.cpu().numpy()
     dims = pred.bboxes_3d.dims.cpu().numpy()       # (l=x, w=y, h=z)
@@ -98,8 +96,8 @@ def _boxes_to_ego_records(pred, ref_cs: dict, score_threshold: float) -> list[di
     for c, dim, yaw, score, label in zip(centers, dims, yaws, scores, labels):
         if score < score_threshold:
             continue
-        center_ego = rot_cs @ c.astype(np.float64) + trans_cs
-        box_rot_ego = rot_cs @ _yaw_rotation(float(yaw))
+        center_ego = sensor_to_ego.apply(c.astype(np.float64))
+        box_rot_ego = sensor_to_ego.rotation @ _yaw_rotation(float(yaw))
         yaw_ego = float(np.arctan2(box_rot_ego[1, 0], box_rot_ego[0, 0]))
         length, width, height = float(dim[0]), float(dim[1]), float(dim[2])
         records.append({
@@ -132,7 +130,7 @@ def export_scene(
     from nuscenes.nuscenes import NuScenes
 
     loader = NuScenesSceneLoader(dataroot=dataroot)
-    scene = loader.scenes[scene_index]
+    scene = loader.scene(scene_index)
     nusc = NuScenes(version=loader.version, dataroot=str(loader.dataroot), verbose=False)
 
     model = init_model(str(config), str(checkpoint), device=device)
@@ -168,10 +166,10 @@ def export_scene(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export CenterPoint 3D detections to prediction JSON.")
-    parser.add_argument("--dataroot", default=None, help="nuScenes root. Defaults to NUSCENES_ROOT or D:/nuscenes.")
+    parser.add_argument("--dataroot", default=None, help="nuScenes root. Defaults to NUSCENES_ROOT or C:/nuscenes.")
     parser.add_argument("--config", required=True, help="mmdet3d CenterPoint config .py path.")
     parser.add_argument("--checkpoint", required=True, help="CenterPoint checkpoint .pth path.")
-    parser.add_argument("--scene-index", type=int, default=0)
+    parser.add_argument("--scene-index", type=int, default=0, help="Available-scene index, as in fsd.visualize --scenes.")
     parser.add_argument("--frames", type=int, default=40)
     parser.add_argument("--score-threshold", type=float, default=0.1)
     parser.add_argument("--sweeps", type=int, default=10, help="LiDAR sweeps to accumulate (nuScenes default 10).")

@@ -1,16 +1,8 @@
-"""2.5D LiDAR BEV tensor: per-cell geometric channels in the ego frame.
+"""2.5D LiDAR BEV tensor: per-cell height statistics in the ego frame.
 
-Turns a raw LiDAR sweep into a multi-channel top-down grid. Every channel is
-computed from the point cloud alone (no labels, no map) so it is deployable on a
-real vehicle. The tensor is the data structure downstream modules (planning,
-lane fitting, the object layer) read instead of re-rasterizing points.
-
-Channels (per cell):
-  density       point count (proxy for surface support / confidence)
-  max_height    tallest return  -> obstacle tops, overhangs
-  min_height    lowest return   -> ground level
-  mean_height   average return
-  height_range  max - min       -> vertical extent (flat road ~0, cars/walls large)
+Channels per cell: point density, min / max / mean height, and height range
+(max - min: ~0 on flat road, large on cars and walls). Computed from the
+point cloud alone, so it is available on a real vehicle.
 """
 
 from __future__ import annotations
@@ -20,146 +12,74 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from fsd.bev import lidar_points_to_ego
-from fsd.data import LidarFrame, SurroundFrame
-from fsd.lidar_projection import load_lidar_points
-
-
-CHANNEL_NAMES = ("density", "max_height", "min_height", "mean_height", "height_range")
+from fsd.bev import BevGrid, draw_ego, draw_metric_grid, resample
+from fsd.data import SurroundFrame
+from fsd.draw import colorize, label_band, with_header
 
 
 @dataclass(frozen=True)
 class BevTensor:
-    """Per-cell geometric channels for one ego-frame BEV grid."""
-
     density: np.ndarray
     max_height: np.ndarray
     min_height: np.ndarray
     mean_height: np.ndarray
     height_range: np.ndarray
     occupied: np.ndarray
-    x_range: tuple[float, float]
-    y_range: tuple[float, float]
-    resolution: float
-
-    def stack(self) -> np.ndarray:
-        """Return an (H, W, 5) float32 array in CHANNEL_NAMES order."""
-        return np.stack(
-            [self.density, self.max_height, self.min_height, self.mean_height, self.height_range],
-            axis=-1,
-        ).astype(np.float32)
+    grid: BevGrid
 
 
-def compute_bev_height_channels(
-    points_ego: np.ndarray,
-    x_range: tuple[float, float] = (-50.0, 50.0),
-    y_range: tuple[float, float] = (-50.0, 50.0),
-    z_range: tuple[float, float] = (-3.0, 5.0),
-    resolution: float = 0.25,
-) -> BevTensor:
-    """Rasterize ego-frame LiDAR points into per-cell height statistics."""
-    h = int(round((x_range[1] - x_range[0]) / resolution))
-    w = int(round((y_range[1] - y_range[0]) / resolution))
+def compute_bev_height_channels(points_ego: np.ndarray, grid: BevGrid, z_range=(-3.0, 5.0)) -> BevTensor:
+    points = points_ego[(points_ego[:, 2] >= z_range[0]) & (points_ego[:, 2] <= z_range[1])]
+    rows, cols, inside = grid.cells(points)
+    h, w = grid.shape
+    flat = rows[inside] * w + cols[inside]
+    z = points[inside, 2].astype(np.float64)
 
-    x, y, z = points_ego[:, 0], points_ego[:, 1], points_ego[:, 2]
-    keep = (
-        (x >= x_range[0]) & (x < x_range[1])
-        & (y >= y_range[0]) & (y < y_range[1])
-        & (z >= z_range[0]) & (z <= z_range[1])
-    )
-    x, y, z = x[keep], y[keep], z[keep]
-
-    rows = np.clip(((x_range[1] - x) / resolution).astype(np.int64), 0, h - 1)
-    cols = np.clip(((y_range[1] - y) / resolution).astype(np.int64), 0, w - 1)
-    flat = rows * w + cols
-
-    count = np.zeros(h * w, dtype=np.float64)
-    np.add.at(count, flat, 1.0)
-    zsum = np.zeros(h * w, dtype=np.float64)
-    np.add.at(zsum, flat, z)
+    count = np.bincount(flat, minlength=h * w).astype(np.float64)
+    zsum = np.bincount(flat, weights=z, minlength=h * w)
     zmax = np.full(h * w, -np.inf)
     np.maximum.at(zmax, flat, z)
     zmin = np.full(h * w, np.inf)
     np.minimum.at(zmin, flat, z)
 
     occupied = count > 0
-    mean = np.where(occupied, zsum / np.maximum(count, 1.0), 0.0)
     zmax = np.where(occupied, zmax, 0.0)
     zmin = np.where(occupied, zmin, 0.0)
-    rng = np.where(occupied, zmax - zmin, 0.0)
-
-    shape = (h, w)
     return BevTensor(
-        density=count.reshape(shape),
-        max_height=zmax.reshape(shape),
-        min_height=zmin.reshape(shape),
-        mean_height=mean.reshape(shape),
-        height_range=rng.reshape(shape),
-        occupied=occupied.reshape(shape),
-        x_range=x_range,
-        y_range=y_range,
-        resolution=resolution,
+        density=count.reshape(h, w),
+        max_height=zmax.reshape(h, w),
+        min_height=zmin.reshape(h, w),
+        mean_height=(zsum / np.maximum(count, 1.0)).reshape(h, w),
+        height_range=(zmax - zmin).reshape(h, w),
+        occupied=occupied.reshape(h, w),
+        grid=grid,
     )
 
 
-def bev_tensor_from_lidar(
-    lidar: LidarFrame,
-    x_range: tuple[float, float] = (-50.0, 50.0),
-    y_range: tuple[float, float] = (-50.0, 50.0),
-    z_range: tuple[float, float] = (-3.0, 5.0),
-    resolution: float = 0.25,
-) -> BevTensor:
-    points_ego = lidar_points_to_ego(load_lidar_points(lidar.pointcloud_path), lidar)
-    return compute_bev_height_channels(points_ego, x_range, y_range, z_range, resolution)
+def _panel(values: np.ndarray, tensor: BevTensor, vmin: float, vmax: float, cmap: int, label: str, view: BevGrid) -> np.ndarray:
+    color = colorize(values, vmin, vmax, cmap)
+    color[~tensor.occupied] = (20, 20, 20)
+    # Nearest keeps cells crisp and never blends a real height with the empty fill.
+    image = resample(color, tensor.grid, view, cv2.INTER_NEAREST)
+    draw_metric_grid(image, view)
+    draw_ego(image, view)
+    label_band(image, label)
+    return image
 
 
-def _colorize(channel: np.ndarray, occupied: np.ndarray, vmin: float, vmax: float, cmap: int) -> np.ndarray:
-    norm = np.clip((channel - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
-    color = cv2.applyColorMap((norm * 255).astype(np.uint8), cmap)
-    color[~occupied] = (20, 20, 20)
-    return color
-
-
-def _panel(image: np.ndarray, label: str, tile: int) -> np.ndarray:
-    h, w = image.shape[:2]
-    scaled = cv2.resize(image, (tile, int(round(h * tile / w))), interpolation=cv2.INTER_NEAREST)
-    cv2.rectangle(scaled, (0, 0), (scaled.shape[1], 22), (0, 0, 0), -1)
-    cv2.putText(scaled, label, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 240, 240), 1, cv2.LINE_AA)
-    return scaled
-
-
-def render_bev_channels(
-    frame: SurroundFrame,
-    tensor: BevTensor,
-    z_range: tuple[float, float] = (-3.0, 5.0),
-    tile: int = 300,
-) -> np.ndarray:
-    """Tile the geometric channels into one inspection sheet."""
-    occ = tensor.occupied
-    density_norm = np.log1p(tensor.density)
-    density_vmax = float(density_norm.max()) if occ.any() else 1.0
-
+def render_bev_channels(frame: SurroundFrame, tensor: BevTensor, view: BevGrid, z_range=(-3.0, 5.0)) -> np.ndarray:
+    log_density = np.log1p(tensor.density)
     panels = [
-        _panel(_colorize(density_norm, occ, 0.0, density_vmax, cv2.COLORMAP_MAGMA), "density (log)", tile),
-        _panel(_colorize(tensor.max_height, occ, z_range[0], z_range[1], cv2.COLORMAP_VIRIDIS), "max height", tile),
-        _panel(_colorize(tensor.min_height, occ, z_range[0], z_range[1], cv2.COLORMAP_VIRIDIS), "min height", tile),
-        _panel(_colorize(tensor.mean_height, occ, z_range[0], z_range[1], cv2.COLORMAP_VIRIDIS), "mean height", tile),
-        _panel(_colorize(tensor.height_range, occ, 0.0, 4.0, cv2.COLORMAP_INFERNO), "height range", tile),
+        _panel(log_density, tensor, 0.0, float(log_density.max() or 1.0), cv2.COLORMAP_MAGMA, "density (log)", view),
+        _panel(tensor.max_height, tensor, *z_range, cv2.COLORMAP_VIRIDIS, "max height", view),
+        _panel(tensor.min_height, tensor, *z_range, cv2.COLORMAP_VIRIDIS, "min height", view),
+        _panel(tensor.mean_height, tensor, *z_range, cv2.COLORMAP_VIRIDIS, "mean height", view),
+        _panel(tensor.height_range, tensor, 0.0, 4.0, cv2.COLORMAP_INFERNO, "height range (0-4 m)", view),
+        _panel(tensor.occupied.astype(np.float64), tensor, 0.0, 1.0, cv2.COLORMAP_BONE, "occupied cells", view),
     ]
-
-    info = np.full((panels[0].shape[0], tile, 3), 24, dtype=np.uint8)
-    occ_cells = int(occ.sum())
-    lines = [
-        f"{frame.scene_name}",
-        f"sample {frame.sample_index}",
-        f"occupied cells: {occ_cells}",
-        f"grid {tensor.density.shape[0]}x{tensor.density.shape[1]}",
-        f"res {tensor.resolution:.2f} m/cell",
-    ]
-    for i, text in enumerate(lines):
-        cv2.putText(info, text, (8, 28 + i * 26), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (210, 230, 255), 1, cv2.LINE_AA)
-    panels.append(info)
-
-    top = np.hstack(panels[:3])
-    bottom = np.hstack(panels[3:])
-    return np.vstack([top, bottom])
+    sheet = np.vstack([np.hstack(panels[:3]), np.hstack(panels[3:])])
+    return with_header(
+        sheet,
+        f"{frame.scene_name} | sample {frame.sample_index} | 2.5D height tensor",
+        f"{int(tensor.occupied.sum())} occupied cells | {tensor.grid.shape[0]}x{tensor.grid.shape[1]} @ {tensor.grid.resolution:.2f} m | heights {z_range[0]:.0f} to {z_range[1]:.0f} m",
+    )

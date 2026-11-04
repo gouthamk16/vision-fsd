@@ -1,9 +1,10 @@
 """Temporal log-odds occupancy fusion over an ego-frame BEV grid.
 
-Maintains a rolling occupancy grid expressed in the current ego frame. Each
-keyframe the previous grid is warped into the new ego frame using nuScenes ego
-poses, decayed toward "unknown", and updated with fresh LiDAR evidence (hits =
-occupied, the polar visible region = free).
+Keeps a rolling grid in the current ego frame. Each keyframe the previous grid
+is warped into the new ego frame by the ego-pose delta and decayed toward
+unknown, then updated with the keyframe sweep: cells holding above-ground
+returns are hits, and cells a ray passes through before its first obstacle are
+misses (free).
 """
 
 from __future__ import annotations
@@ -11,164 +12,119 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from fsd.bev import lidar_points_to_ego
-from fsd.data import LidarFrame, SurroundFrame
-from fsd.lidar_projection import load_lidar_points, quaternion_to_rotation_matrix
-
-
-def _relative_se2(prev_pose: dict, cur_pose: dict) -> tuple[np.ndarray, np.ndarray]:
-    """SE(2) mapping a point in the current ego frame to the previous ego frame."""
-    rot_prev = quaternion_to_rotation_matrix(prev_pose["rotation"])[:2, :2]
-    rot_cur = quaternion_to_rotation_matrix(cur_pose["rotation"])[:2, :2]
-    t_prev = np.asarray(prev_pose["translation"][:2], dtype=np.float64)
-    t_cur = np.asarray(cur_pose["translation"][:2], dtype=np.float64)
-    r_rel = rot_prev.T @ rot_cur
-    t_rel = rot_prev.T @ (t_cur - t_prev)
-    return r_rel, t_rel
+from fsd.bev import BevGrid, draw_ego, draw_metric_grid, resample
+from fsd.data import LidarFrame, Pose, SurroundFrame
+from fsd.draw import with_header
 
 
 class TemporalOccupancyMapper:
-    """Rolling ego-frame log-odds occupancy grid fused across keyframes."""
-
     def __init__(
         self,
-        x_range: tuple[float, float] = (-50.0, 50.0),
-        y_range: tuple[float, float] = (-50.0, 50.0),
-        z_range: tuple[float, float] = (-2.5, 3.0),
+        grid: BevGrid = BevGrid(),
         ground_height: float = 0.3,
-        resolution: float = 0.25,
+        max_height: float = 3.0,
         logit_hit: float = 0.85,
         logit_miss: float = 0.4,
         clamp: float = 5.0,
         decay: float = 0.97,
+        azimuth_bins: int = 720,
     ):
-        self.x_range = x_range
-        self.y_range = y_range
-        self.z_range = z_range
+        self.grid = grid
         self.ground_height = ground_height
-        self.resolution = resolution
+        self.max_height = max_height
         self.logit_hit = logit_hit
         self.logit_miss = logit_miss
         self.clamp = clamp
         self.decay = decay
-
-        self.h = int(round((x_range[1] - x_range[0]) / resolution))
-        self.w = int(round((y_range[1] - y_range[0]) / resolution))
-        self.logodds = np.zeros((self.h, self.w), dtype=np.float32)
-        self._last_pose: dict | None = None
+        self.azimuth_bins = azimuth_bins
+        h, w = grid.shape
+        rows, cols = np.mgrid[0:h, 0:w]
+        self._cell_xy = np.stack(
+            [grid.x_range[1] - (rows + 0.5) * grid.resolution, grid.y_range[1] - (cols + 0.5) * grid.resolution],
+            axis=-1,
+        )
+        self.logodds = np.zeros((h, w), dtype=np.float32)
+        self._last_pose: Pose | None = None
+        self._scene_token: str | None = None
 
     def reset(self) -> None:
         self.logodds.fill(0.0)
         self._last_pose = None
 
-    def _pixel_affine(self, prev_pose: dict, cur_pose: dict) -> np.ndarray:
-        r_rel, t_rel = _relative_se2(prev_pose, cur_pose)
-        se2 = np.eye(3)
-        se2[:2, :2] = r_rel
-        se2[:2, 2] = t_rel
-
-        res = self.resolution
-        x_max = self.x_range[1]
-        y_max = self.y_range[1]
-        # pixel [col,row,1] -> meter [x,y,1]
-        p2m = np.array([[0.0, -res, x_max], [-res, 0.0, y_max], [0.0, 0.0, 1.0]])
-        # meter [x,y,1] -> pixel [col,row,1]
-        m2p = np.array([[0.0, -1.0 / res, y_max / res], [-1.0 / res, 0.0, x_max / res], [0.0, 0.0, 1.0]])
-        full = m2p @ se2 @ p2m
-        return full[:2].astype(np.float32)
-
-    def _evidence(self, points_ego: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Height split: ground-level returns -> free, above-ground -> occupied.
-
-        Marking only observed cells (rather than ray-casting free space) keeps
-        the ground plane out of the occupied set and avoids treating the road
-        as an obstacle.
-        """
-        free = np.zeros((self.h, self.w), dtype=bool)
-        occ = np.zeros((self.h, self.w), dtype=bool)
-
-        x, y, z = points_ego[:, 0], points_ego[:, 1], points_ego[:, 2]
-        cols = ((self.y_range[1] - y) / self.resolution).astype(np.int32)
-        rows = ((self.x_range[1] - x) / self.resolution).astype(np.int32)
-        inb = (rows >= 0) & (rows < self.h) & (cols >= 0) & (cols < self.w)
-
-        ground = inb & (z >= self.z_range[0]) & (z < self.ground_height)
-        obstacle = inb & (z >= self.ground_height) & (z <= self.z_range[1])
-        free[rows[ground], cols[ground]] = True
-        occ[rows[obstacle], cols[obstacle]] = True
-        return free, occ
-
-    def step(self, lidar: LidarFrame) -> np.ndarray:
-        """Fuse one LiDAR frame and return the current occupancy probability grid."""
-        cur_pose = lidar.ego_pose
+    def step(self, frame: SurroundFrame, lidar: LidarFrame, points: np.ndarray) -> np.ndarray:
+        """Fuse the keyframe sweep (points with age 0) and return occupancy probability."""
+        if frame.scene_token != self._scene_token:
+            self.reset()
+            self._scene_token = frame.scene_token
         if self._last_pose is not None:
-            affine = self._pixel_affine(self._last_pose, cur_pose)
-            # `affine` already maps current-frame pixels to previous-frame
-            # pixels, so use WARP_INVERSE_MAP (cv2 otherwise inverts M itself).
-            self.logodds = cv2.warpAffine(
-                self.logodds,
-                affine,
-                (self.w, self.h),
-                flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=0.0,
-            )
+            self.logodds = self._warp(self.logodds, lidar.ego_pose.relative_to(self._last_pose))
         self.logodds *= self.decay
 
-        points_ego = lidar_points_to_ego(load_lidar_points(lidar.pointcloud_path), lidar)
-        free, occ = self._evidence(points_ego)
-        free[occ] = False
-        self.logodds[free] += -self.logit_miss
+        free, occ = self._evidence(points[points[:, 3] == 0], lidar.calibration.translation[:2])
+        self.logodds[free & ~occ] -= self.logit_miss
         self.logodds[occ] += self.logit_hit
         np.clip(self.logodds, -self.clamp, self.clamp, out=self.logodds)
-
-        self._last_pose = cur_pose
+        self._last_pose = lidar.ego_pose
         return 1.0 / (1.0 + np.exp(-self.logodds))
 
+    def _warp(self, grid: np.ndarray, current_to_previous: Pose) -> np.ndarray:
+        # Pixel centres: (col, row) <-> (x, y) = (x_max - (row + .5) r, y_max - (col + .5) r).
+        r, x_max, y_max = self.grid.resolution, self.grid.x_range[1], self.grid.y_range[1]
+        px_to_m = np.array([[0.0, -r, x_max - 0.5 * r], [-r, 0.0, y_max - 0.5 * r], [0.0, 0.0, 1.0]])
+        m_to_px = np.linalg.inv(px_to_m)
+        se2 = np.eye(3)
+        se2[:2, :2] = current_to_previous.rotation[:2, :2]
+        se2[:2, 2] = current_to_previous.translation[:2]
+        affine = (m_to_px @ se2 @ px_to_m)[:2].astype(np.float32)
+        h, w = grid.shape
+        # `affine` maps current pixels to previous ones, hence WARP_INVERSE_MAP.
+        return cv2.warpAffine(grid, affine, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderValue=0.0)
 
-def render_occupancy_bev(
-    frame: SurroundFrame,
-    prob: np.ndarray,
-    x_range: tuple[float, float] = (-50.0, 50.0),
-    y_range: tuple[float, float] = (-50.0, 50.0),
-    resolution: float = 0.25,
-    scale: int = 2,
-) -> np.ndarray:
-    """Colour the fused occupancy: free = dark blue, unknown = gray, occupied = warm."""
-    h, w = prob.shape
-    occ_amt = np.clip((prob - 0.5) * 2.0, 0.0, 1.0)[..., None]
-    free_amt = np.clip((0.5 - prob) * 2.0, 0.0, 1.0)[..., None]
+    def _evidence(self, points: np.ndarray, sensor_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        h, w = self.grid.shape
+        points = points[points[:, 2] <= self.max_height]
+        obstacle = points[:, 2] >= self.ground_height
+        rows, cols, inside = self.grid.cells(points)
+        occ = np.zeros((h, w), dtype=bool)
+        keep = inside & obstacle
+        occ[rows[keep], cols[keep]] = True
 
-    base = np.full((h, w, 3), 90, dtype=np.float32)
-    free_color = np.array([70, 35, 20], dtype=np.float32)   # BGR navy
-    occ_color = np.array([60, 235, 255], dtype=np.float32)  # BGR amber/white
-    canvas = base * (1 - free_amt - occ_amt) + free_color * free_amt + occ_color * occ_amt
-    canvas = np.clip(canvas, 0, 255).astype(np.uint8)
+        rel = points[:, :2] - sensor_xy
+        bins = self._azimuth_bin(rel)
+        ranges = np.hypot(rel[:, 0], rel[:, 1])
+        first_hit = np.full(self.azimuth_bins, np.inf)
+        np.minimum.at(first_hit, bins[obstacle], ranges[obstacle])
+        farthest_seen = np.zeros(self.azimuth_bins)
+        np.maximum.at(farthest_seen, bins, ranges)
 
-    for x in range(int(np.ceil(x_range[0] / 10) * 10), int(x_range[1]) + 1, 10):
-        row = int((x_range[1] - x) / resolution)
-        if 0 <= row < h:
-            cv2.line(canvas, (0, row), (w - 1, row), (50, 50, 50), 1)
-    for y in range(int(np.ceil(y_range[0] / 10) * 10), int(y_range[1]) + 1, 10):
-        col = int((y_range[1] - y) / resolution)
-        if 0 <= col < w:
-            cv2.line(canvas, (col, 0), (col, h - 1), (50, 50, 50), 1)
+        cell_rel = self._cell_xy - sensor_xy
+        cell_bins = self._azimuth_bin(cell_rel.reshape(-1, 2)).reshape(h, w)
+        cell_range = np.hypot(cell_rel[..., 0], cell_rel[..., 1])
+        # Stop one cell short of the first obstacle so its own cell is not cleared.
+        limit = np.minimum(first_hit - self.grid.resolution, farthest_seen)
+        return cell_range < limit[cell_bins], occ
 
-    row0 = int(x_range[1] / resolution)
-    col0 = int(y_range[1] / resolution)
-    car_w = max(4, int(2.0 / resolution))
-    car_l = max(8, int(4.5 / resolution))
-    cv2.rectangle(canvas, (col0 - car_w // 2, row0 - car_l // 2), (col0 + car_w // 2, row0 + car_l // 2), (0, 200, 0), -1)
-    cv2.arrowedLine(canvas, (col0, row0), (col0, row0 - car_l), (255, 255, 255), 1, tipLength=0.4)
+    def _azimuth_bin(self, rel: np.ndarray) -> np.ndarray:
+        angle = np.arctan2(rel[:, 1], rel[:, 0])
+        return ((angle + np.pi) / (2 * np.pi) * self.azimuth_bins).astype(np.int64) % self.azimuth_bins
 
-    header_h = 58
-    output = np.full((header_h + h, w, 3), 18, dtype=np.uint8)
-    output[header_h:, :] = canvas
-    title = f"{frame.scene_name} | sample {frame.sample_index} | temporal occupancy (log-odds)"
-    legend = "occupied=amber  free=navy  unknown=gray"
-    cv2.putText(output, title, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (245, 245, 245), 1, cv2.LINE_AA)
-    cv2.putText(output, legend, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (200, 220, 255), 1, cv2.LINE_AA)
 
-    if scale > 1:
-        output = cv2.resize(output, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-    return output
+def occupancy_canvas(prob: np.ndarray, raster: BevGrid, view: BevGrid) -> np.ndarray:
+    """Free = navy, unknown = dark gray, occupied = amber, resampled smoothly to `view`."""
+    prob = resample(prob.astype(np.float32) - 0.5, raster, view) + 0.5
+    occ = np.clip((prob - 0.5) * 2.0, 0.0, 1.0)[..., None]
+    free = np.clip((0.5 - prob) * 2.0, 0.0, 1.0)[..., None]
+    unknown = np.array([42, 42, 42], dtype=np.float32)
+    image = unknown * (1 - occ - free) + np.array([95, 45, 20], np.float32) * free + np.array([60, 200, 255], np.float32) * occ
+    return image.astype(np.uint8)
+
+
+def render_occupancy_bev(frame: SurroundFrame, prob: np.ndarray, raster: BevGrid, view: BevGrid) -> np.ndarray:
+    image = occupancy_canvas(prob, raster, view)
+    draw_metric_grid(image, view)
+    draw_ego(image, view)
+    return with_header(
+        image,
+        f"{frame.scene_name} | sample {frame.sample_index} | temporal occupancy (log-odds)",
+        "occupied = amber   free (ray-cast) = navy   unknown = gray",
+    )

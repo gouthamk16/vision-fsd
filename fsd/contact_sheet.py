@@ -1,58 +1,57 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Callable
+
 import cv2
 import numpy as np
 
-from fsd.data import CAMERA_CHANNELS, SurroundFrame
+from fsd.data import CAMERA_CHANNELS, CameraFrame, SurroundFrame
+from fsd.draw import label_band, with_header
+
+# Draws on a tile and returns its label. The camera it receives has intrinsics
+# scaled to the tile, so projections land directly in tile pixels.
+TileAnnotator = Callable[[np.ndarray, CameraFrame], str]
 
 
-def render_contact_sheet(frame: SurroundFrame, tile_width: int = 640) -> np.ndarray:
+def read_image(camera: CameraFrame) -> np.ndarray:
+    image = cv2.imread(str(camera.image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise FileNotFoundError(f"Could not read camera image: {camera.image_path}")
+    return image
+
+
+def camera_sheet(
+    frame: SurroundFrame,
+    tile_width: int,
+    title: str,
+    subtitle: str = "",
+    annotate: TileAnnotator | None = None,
+) -> np.ndarray:
+    """Tile the six cameras 3+3 under a header, annotating each tile."""
     tiles = []
     for channel in CAMERA_CHANNELS:
         camera = frame.cameras[channel]
-        image = cv2.imread(str(camera.image_path), cv2.IMREAD_COLOR)
-        if image is None:
-            raise FileNotFoundError(f"Could not read camera image: {camera.image_path}")
-
-        height, width = image.shape[:2]
-        scale = tile_width / width
-        tile_size = (tile_width, int(round(height * scale)))
-        tile = cv2.resize(image, tile_size, interpolation=cv2.INTER_AREA)
-
-        frame_type = "key" if camera.is_key_frame else "sweep"
-        label = f"{channel}  {frame_type}  t={camera.timestamp_us}"
-        cv2.rectangle(tile, (0, 0), (tile.shape[1], 34), (0, 0, 0), -1)
-        cv2.putText(
-            tile,
-            label,
-            (10, 23),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
+        image = read_image(camera)
+        scale = tile_width / image.shape[1]
+        tile = cv2.resize(image, (tile_width, int(round(image.shape[0] * scale))), interpolation=cv2.INTER_AREA)
+        tile_camera = replace(camera, intrinsic=np.diag([scale, scale, 1.0]) @ camera.intrinsic)
+        label = annotate(tile, tile_camera) if annotate else channel
+        label_band(tile, label)
         tiles.append(tile)
+    return with_header(np.vstack([np.hstack(tiles[:3]), np.hstack(tiles[3:])]), title, subtitle)
 
-    top = np.hstack(tiles[:3])
-    bottom = np.hstack(tiles[3:])
 
-    header_h = 76
-    sheet = np.zeros((header_h + top.shape[0] + bottom.shape[0], top.shape[1], 3), dtype=np.uint8)
-    sheet[:] = (22, 22, 22)
+def render_contact_sheet(frame: SurroundFrame, tile_width: int = 640) -> np.ndarray:
+    def annotate(_: np.ndarray, camera: CameraFrame) -> str:
+        return f"{camera.channel}  {'key' if camera.is_key_frame else 'sweep'}  t={camera.timestamp_us}"
 
-    ego = frame.ego_pose
-    frame_type = "keyframe" if frame.is_key_frame else "sweep"
-    header = f"{frame.scene_name} | {frame_type} {frame.sample_index} | token {frame.sample_token}"
-    pose = (
-        f"ego xyz=({ego['translation'][0]:.2f}, {ego['translation'][1]:.2f}, "
-        f"{ego['translation'][2]:.2f})"
+    x, y, z = frame.ego_pose.translation
+    kind = "keyframe" if frame.is_key_frame else "sweep"
+    return camera_sheet(
+        frame,
+        tile_width,
+        f"{frame.scene_name} | {kind} {frame.sample_index} | token {frame.sample_token}",
+        f"ego xyz=({x:.2f}, {y:.2f}, {z:.2f})",
+        annotate,
     )
-    cv2.putText(sheet, header, (12, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (245, 245, 245), 1, cv2.LINE_AA)
-    cv2.putText(sheet, pose, (12, 59), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (190, 220, 255), 1, cv2.LINE_AA)
-
-    y = header_h
-    sheet[y:y + top.shape[0], :] = top
-    y += top.shape[0]
-    sheet[y:y + bottom.shape[0], :] = bottom
-    return sheet
