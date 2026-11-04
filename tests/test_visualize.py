@@ -6,10 +6,17 @@ from fsd.visualize import LSS_VIEWS, VIEWS, _output_paths, _select_views, parse_
 
 
 def test_all_skips_lss_views_without_weights():
-    assert set(_select_views("all", None)) == set(VIEWS) - LSS_VIEWS
-    assert _select_views("all", "lss.pt") == list(VIEWS)
+    assert set(_select_views("all", None, "nmp.pt")) == set(VIEWS) - LSS_VIEWS
+    assert _select_views("all", "lss.pt", "nmp.pt") == list(VIEWS)
     with pytest.raises(ValueError, match="--lss-weights"):
-        _select_views("lss_bev", None)
+        _select_views("lss_bev", None, None)
+
+
+def test_all_skips_planner_without_weights():
+    assert "planner_bev" not in _select_views("all", "lss.pt", None)
+    assert "planner_bev" in VIEWS
+    with pytest.raises(ValueError, match="--nmp-weights"):
+        _select_views("planner_bev", None, None)
 
 
 def test_output_paths_suffix_a_shared_base_per_view():
