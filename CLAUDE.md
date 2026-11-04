@@ -31,9 +31,15 @@ pip install -r requirements.txt
 `fsd/centerpoint_export.py` is the one exception: it needs mmdet3d +
 nuscenes-devkit against torch 2.1/cu121, which conflicts with the pins above,
 so it runs in a separate `.venv-mmdet3d`. It is not covered by
-`requirements.txt` and cannot be imported from the main env.
+`requirements.txt` and cannot be imported from the main env. It is also the
+one module with its own CLI, because it cannot run in the main env.
 
-nuScenes data is read from `D:/nuscenes`, override with `NUSCENES_ROOT`.
+nuScenes data is read from `C:/nuscenes`, override with `NUSCENES_ROOT`. The
+flat devkit layout is expected (`samples/`, `sweeps/`, `maps/`,
+`v1.0-trainval/`). Only scenes whose blobs are extracted are listed, so scene
+indices count available scenes. The first run indexes the large metadata
+tables once into `~/.cache/vision-fsd/`; extracting another blob part
+invalidates that cache automatically.
 
 Weights: `yolo26n.pt` must be at the repo root. DepthAnything V2 and YOLOPv2
 download themselves on first run. The Lift-Splat-Shoot checkpoint is manual —
@@ -49,37 +55,46 @@ The dependency order is the thing worth knowing, since it is not obvious from
 filenames and most modules sit in the middle of it:
 
 ```
-data.py              nuScenes loader: scenes, samples, calibration, ego pose
+nuscenes_index.py    one streaming pass over the big metadata tables, cached
   |
-lidar_projection.py  geometry primitives (transform_points,
-  |                  quaternion_to_rotation_matrix). Reused by 12 modules.
+data.py              Pose (typed rigid transform), Camera/Lidar/SurroundFrame,
+  |                  scene + sweep iteration. Frames carry the LIDAR_TOP ego
+  |                  pose as their reference: annotations are defined there.
   |
-bev.py               rasterize a LiDAR sweep to an ego-frame BEV image
-bev_tensor.py        2.5D variant: per-cell density + min/max/mean/range height
+ego_motion.py        ego footprint (rear-axle origin) and EgoState
+lidar_projection.py  multi-sweep ego-frame points (self-returns removed),
+  |                  camera projection
   |
-occupancy.py         temporal log-odds fusion across keyframes (stateful)
+bev.py               BevGrid: the single BEV pixel convention, resampling,
+  |                  and anti-aliased vector drawing at view resolution
   |
-motion_planning/     ego_motion / occupancy / state provide the ego-state and
-  |                  collision-grid primitives, and the planner itself samples
-  |                  trajectories. Does NOT import world_model.
+bev_tensor.py        per-cell height statistics on a BevGrid
+occupancy.py         temporal log-odds fusion with ray-cast free space
   |
-world_model.py       top of the chain: fuses occupancy + height + ego state +
-                     object footprints + per-object velocity (tracking.py).
-                     Imports from motion_planning, not the reverse.
+world_model.py       occupancy + ego state + tracked objects (tracking.py)
 ```
 
-Note the direction: `motion_planning/` is a dependency of `world_model.py`, not
-a consumer of it. Both are read by `visualize.py`, which is what actually wires
-the planner views and the world-model view together.
+Rasters are computed on a coarse grid (`--bev-resolution`, 0.25 m) and views
+render the same extent on a fine grid (`--bev-ppm`, 10 px/m), drawing
+points, boxes, map and text directly at that resolution. Never draw on a
+raster and upscale it; that is what made the old views blurry.
 
-Sitting outside that chain: `lss.py` (camera-only BEV via Lift-Splat-Shoot),
-`nuscenes_map.py` (HD map background), `fusion_detect.py` (camera+LiDAR
-frustum fusion), `object_detection.py` (GT/prediction box loading + drawing),
-`contact_sheet.py` (six-camera tiling).
+`visualize.py` computes per-frame products (points, occupancy, detections,
+LSS output, map background) once and shares them across views; a view is an
+entry in its `RENDERERS` table.
+
+Sitting outside that chain: `draw.py` (headers, labels, blending),
+`contact_sheet.py` (six-camera tiling with per-tile annotation),
+`nuscenes_map.py` (HD map layers), `lss.py` (camera-only BEV via
+Lift-Splat-Shoot), `fusion_detect.py` (camera+LiDAR frustum fusion),
+`object_detection.py` (GT/prediction boxes and drawing).
 
 Views: `cameras`, `lidar`, `bev`, `lss_bev`, `lss_lidar_bev`, `occupancy_bev`,
-`height_bev`, `objects_bev`, `objects_cameras`, `planner_bev`,
-`planner_camera`, `world_bev`, `all`.
+`height_bev`, `objects_bev`, `objects_cameras`, `world_bev`, `all` (LSS views
+are included only with `--lss-weights`).
+
+There is no motion planner at the moment. The previous lattice planner was
+removed; a learned NMP-style planner is planned to replace it.
 
 ## Architecture — `monocular_vision/` (legacy)
 
@@ -97,8 +112,8 @@ Four subsystems run per frame inside `FrameProcessor`:
 
 BEV rendering in `detect.py` projects 2D boxes plus per-object depth into a
 320×440 minimap covering ~83 m forward and ±32 m lateral. Per-class depth
-extents are hardcoded priors (Car 1.8 m, Truck 12 m, Bus 2.2 m,
-Bicycle/Motorcycle 0.4–4.5 m). Tracked COCO classes: Bicycle(1), Car(2),
+extents are hardcoded priors (Car 4.5 m, Truck 8.5 m, Bus 12 m,
+Bicycle 1.8 m, Motorcycle 2.2 m). Tracked COCO classes: Bicycle(1), Car(2),
 Motorcycle(3), Bus(5), Truck(7).
 
 Outputs land in `outputs/`, logs in `logs/`. `LOGGING_LEVEL` controls
@@ -106,15 +121,16 @@ verbosity (default INFO).
 
 ## Tests
 
-`pytest tests/` — 51 tests, mostly covering `motion_planning/` and
-`tracking.py`. There is no linter or CI configured.
+`pytest tests/` covers the data layer, BEV geometry, occupancy, tracking,
+detection geometry, the map renderer and the visualizer's view selection.
+There is no linter or CI configured.
 
 Tests are pure-Python and need neither a GPU nor the nuScenes dataset. Changes
 touching rendering or the pipelines should additionally be validated by
 actually running them:
 
 ```bash
-python -m fsd.visualize --view world_bev --frames 5 --save
+python -m fsd.visualize --view all --frames 5 --save
 python main.py data/test_nyc.mp4 --stream --frames 60
 ```
 
@@ -122,27 +138,25 @@ python main.py data/test_nyc.mp4 --stream --frames 60
 
 - Simplest correct solution over the extensible one. A function earns its
   existence by being reused or by making the code clearer.
-- Files under ~300 lines, functions under ~30. These are the target for new
-  and modified code, not a description of the current state: the existing tree
-  has 6 files over 300 lines (`build_whitepaper.py` 954, `data.py` 600,
-  `lss.py` 545, `object_detection.py` 530, `visualize.py` 467, `detect.py` 305)
-  and 65 functions over 30 lines, the worst being `build()` 500,
-  `run_visualizer()` 240 and `driver()` 161. Don't grow them; split when you
-  have a reason to touch one. A repo-wide refactor to these limits has not
-  been done and would need test coverage on the render paths first.
+- Files under ~300 lines, functions under ~30. Don't grow the exceptions
+  below; split when you
+  have a reason to touch one. `fsd/` is within them apart from `lss.py`'s
+  faithful port of the upstream model; the remaining offenders are
+  `docs/build_whitepaper.py` (`build()` 500 lines) and the legacy
+  `monocular_vision/` (`driver()` 167 lines).
 - No comments restating what the code does. Comment the non-obvious only: why
   a threshold is that value, a workaround for a library bug, an invariant not
   visible locally.
 - Duplicated logic gets extracted at 3+ occurrences. Two usually don't yet.
 - Data crossing a module boundary is a typed structure, not a loose dict. The
-  `@dataclass` types in `fsd/data.py`, `object_detection.Box3D` and
-  `motion_planning/state.py` are the pattern to follow; nuScenes JSON records
+  `@dataclass` types in `fsd/data.py` (`Pose`, the frame types) and
+  `object_detection.Box3D` are the pattern to follow; nuScenes JSON records
   stay dicts only until they are parsed into one of those.
 - Explicit error handling where the failure is actionable, not a blanket
   try/except several layers up. `FrameProcessor.__init__` is the right shape —
   it catches per subsystem so a missing depth model degrades instead of
-  killing the pipeline. The broad `except Exception` around the whole
-  per-frame body in `process_frame.py` is the wrong shape; don't copy it.
+  killing the pipeline. A broad `except Exception` around a whole per-frame
+  body is the wrong shape.
 - Imports at module top level. The one accepted exception is a heavy or
   environment-specific ML import deferred into its function, and only with the
   reason stated inline: `centerpoint_export.py` (mmdet3d exists only in
