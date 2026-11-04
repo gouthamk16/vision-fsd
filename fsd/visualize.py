@@ -29,6 +29,8 @@ from fsd.world_model import WorldModelBuilder, render_world_model_bev
 LSS_VIEWS = {"lss_bev", "lss_lidar_bev"}
 CAMERA_ONLY_VIEWS = {"cameras", "lss_bev"}
 MAP_VIEWS = {"bev", "lss_bev", "objects_bev", "world_bev", "planner_bev"}
+# planner_bev over LiDAR sweeps plans at 10 Hz: 5x the keyframe rate at half the render cost of 20 Hz.
+PLANNER_SWEEP_STRIDE = 2
 
 
 @dataclass
@@ -89,7 +91,7 @@ def _lss_lidar(p: _Products, c: _Context) -> np.ndarray:
 
 def _planner(p: _Products, c: _Context) -> np.ndarray:
     result = c.planner.plan(p.frame, p.lidar, c.planner_map)
-    future = [pose.relative_to(p.frame.ego_pose) for pose in c.loader.future_ego_poses(p.frame.sample_token, c.planner.cfg.horizon)]
+    future = [pose.relative_to(p.frame.ego_pose) for pose in c.loader.future_ego_poses(p.frame, c.planner.cfg.horizon)]
     logged = np.array([[q.translation[0], q.translation[1], q.yaw] for q in future]) if future else None
     return render_planner_bev(p.frame, p.points, result, c.planner.cfg.grid, c.map_renderer, logged)
 
@@ -148,7 +150,9 @@ def _build_context(views: list[str], loader: NuScenesSceneLoader, opts: argparse
 def _frames(loader: NuScenesSceneLoader, opts: argparse.Namespace, needs_lidar: bool, sweeps: int) -> Iterator[tuple[SurroundFrame, LidarFrame | None]]:
     for i, scene_index in enumerate([0] if opts.scene_name else opts.scenes):
         start = opts.start_sample_index if i == 0 else 0
-        if opts.sequence == "sweeps":
+        if opts.sequence == "sweeps" and opts.view == "planner_bev":
+            yield from loader.iter_lidar_sweep_frames(scene_index, opts.frames, opts.scene_name, sweeps, PLANNER_SWEEP_STRIDE)
+        elif opts.sequence == "sweeps":
             for frame in loader.iter_camera_sweep_frames(scene_index, start, opts.frames, opts.scene_name):
                 yield frame, None
         else:
@@ -195,8 +199,8 @@ class _Sink:
 
 def run_visualizer(opts: argparse.Namespace) -> list[Path]:
     """Render the requested views; returns the MP4s written (none when streaming)."""
-    if opts.sequence == "sweeps" and opts.view != "cameras":
-        raise ValueError("--sequence sweeps supports --view cameras only")
+    if opts.sequence == "sweeps" and opts.view not in ("cameras", "planner_bev"):
+        raise ValueError("--sequence sweeps supports --view cameras or planner_bev only")
     views = _select_views(opts.view, opts.lss_weights, opts.nmp_weights)
     loader = NuScenesSceneLoader(dataroot=opts.dataroot)
     ctx = _build_context(views, loader, opts)
@@ -239,7 +243,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--start-sample-index", type=int, default=0, help="First keyframe or sweep index (first scene only).")
     parser.add_argument("--frames", type=_frames_arg, default=20, help="Max frames per scene, or 'all'.")
     parser.add_argument("--view", choices=VIEWS + ("all",), default="lidar")
-    parser.add_argument("--sequence", choices=("keyframes", "sweeps"), default="keyframes", help="Key samples, or every camera sweep (cameras view only).")
+    parser.add_argument("--sequence", choices=("keyframes", "sweeps"), default="keyframes", help="Key samples (2 Hz), or sweeps: every camera image for cameras, 10 Hz LiDAR for planner_bev.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--save", action="store_true", help="Save one MP4 per view (the default).")
     mode.add_argument("--stream", action="store_true", help="Show in a window instead of saving MP4s.")

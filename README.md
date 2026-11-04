@@ -170,6 +170,9 @@ python -m fsd.nmp.train cache --split train    # ~9 min, ~1 GB in ~/.cache/visio
 python -m fsd.nmp.train fit                    # 20 epochs, ~3 h on an 8 GB laptop GPU
 python -m fsd.nmp.train eval --weights checkpoints/nmp/best.pt
 python -m fsd.visualize --view planner_bev --nmp-weights checkpoints/nmp/best.pt --scene-name scene-0003 --save
+
+# Plan at 10 Hz on LiDAR sweeps instead of 2 Hz keyframes, over five consecutive val scenes (~100 s)
+python -m fsd.visualize --view planner_bev --nmp-weights checkpoints/nmp/best.pt --sequence sweeps --scenes 75-79 --frames all --fps 10 --save
 ```
 
 nuScenes data is read from `C:/nuscenes` (override with `--dataroot` or `NUSCENES_ROOT`). Extract the official archives straight into that root, which gives the flat devkit layout:

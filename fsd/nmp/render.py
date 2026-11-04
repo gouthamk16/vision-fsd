@@ -130,7 +130,7 @@ def _annotate(ax, frame: SurroundFrame, result: PlanResult, logged: np.ndarray |
     stats = f"plan {length:.1f} m in 3 s"
     if logged is not None and len(logged) == len(result.plan):
         stats += f"  ·  {np.hypot(*(result.plan[-1, :2] - logged[-1, :2])):.1f} m from the human at 3 s"
-    ax.set_title(f"{frame.scene_name}  ·  keyframe {frame.sample_index}  ·  ego {result.v0:.1f} m/s", fontsize=10.5, loc="left")
+    ax.set_title(f"{frame.scene_name}  ·  frame {frame.sample_index}  ·  ego {result.v0:.1f} m/s", fontsize=10.5, loc="left")
     ax.set_title(stats, fontsize=9, loc="right", color="#555555")
     handles = [Line2D([], [], color=PLAN, lw=3, marker="o", mfc="white", mec=PLAN, label="NMP plan (dots every 0.5 s)")]
     if logged is not None:
