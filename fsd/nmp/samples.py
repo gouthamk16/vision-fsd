@@ -137,7 +137,7 @@ def _sample(
     frame = window[0]
     future = [f.ego_pose.relative_to(frame.ego_pose) for f in window[1:]]
     points, sweep = sweep_points(lidar, cfg)
-    boxes, valid, classes, points = _future_boxes(window, [loader.annotations(f.sample_token) for f in window], annotations.category_of_instance)
+    boxes, valid, classes, box_points = _future_boxes(window, [loader.annotations(f.sample_token) for f in window], annotations.category_of_instance)
     v0, k0 = ego_state(lidar)
     return NmpSample(
         token=frame.sample_token,
@@ -150,7 +150,7 @@ def _sample(
         boxes=boxes,
         box_valid=valid,
         box_class=classes,
-        box_points=points,
+        box_points=box_points,
     )
 
 

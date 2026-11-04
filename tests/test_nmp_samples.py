@@ -1,12 +1,14 @@
 import math
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from conftest import make_frame, yaw_pose
 from fsd.data import LidarFrame, LidarSweep
 from fsd.nmp.config import NmpConfig
-from fsd.nmp.samples import CLASS_NAMES, NmpSample, _future_boxes, ego_state, load_sample, save_sample, voxelize
+from fsd.nmp.samples import CLASS_NAMES, NmpSample, _future_boxes, build_scene_samples, ego_state, load_sample, save_sample, voxelize
 
 CFG = NmpConfig()
 
@@ -71,3 +73,20 @@ def test_save_load_round_trip(tmp_path):
     for field in ("voxels", "map_masks", "ego_future", "boxes", "box_valid", "box_class", "box_points"):
         assert np.array_equal(getattr(loaded, field), getattr(sample, field)) and getattr(loaded, field).dtype == getattr(sample, field).dtype
     assert (loaded.token, loaded.scene, loaded.v0, loaded.k0) == ("tok", "scene-0001", 4.5, -0.01)
+
+
+def test_scene_samples_skip_keyframes_without_full_history_or_future(tmp_path):
+    cfg = replace(CFG, x_range=(-8.0, 8.0), y_range=(-4.8, 4.8))
+    scan = tmp_path / "scan.bin"
+    np.array([[5.0, 1.0, 0.5, 0.0, 0.0]], np.float32).tofile(scan)
+    frames = []
+    for i in range(12):  # history grows 5 sweeps per keyframe, so only keyframes 4+ have the 19 needed
+        t = 500_000 * i
+        sweeps = tuple(LidarSweep(scan, t - 50_000 * j, yaw_pose(), yaw_pose(0.1 * i)) for j in range(min(19, 5 * i + 1)))
+        frames.append((replace(make_frame(yaw_pose(0.1 * i), t), sample_token=f"s{i}", sample_index=i), LidarFrame(sweeps)))
+    loader = SimpleNamespace(iter_scene_frames=lambda **_: iter(frames), annotations=lambda token: [])
+    maps = SimpleNamespace(layer_masks=lambda frame, grid, layers: np.zeros((len(layers), *grid.shape), np.uint8))
+    samples = build_scene_samples(loader, maps, SimpleNamespace(category_of_instance={}), "scene-x", cfg)
+    # 12 keyframes leave 6 with a full 3 s future; of those, keyframes 0-3 lack history.
+    assert [s.token for s in samples] == ["s4", "s5"]
+    assert len(samples[0].voxels) > 0 and samples[0].ego_future.shape == (cfg.horizon, 3)
