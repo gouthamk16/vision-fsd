@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from fsd.bev import SHIFT, fixed_point
 from fsd.nmp.config import NmpConfig
@@ -71,3 +71,10 @@ def collate(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
             padded.append(torch.cat([item[key], item[key].new_zeros((pad, *item[key].shape[1:]))]))
         batch[key] = torch.stack(padded)
     return batch
+
+
+def make_loader(cache_dir: Path, split: str, cfg: NmpConfig, batch_size: int, workers: int, limit: int | None, shuffle: bool) -> DataLoader:
+    dataset = NmpDataset(cache_dir, split, cfg)
+    if limit is not None:
+        dataset = Subset(dataset, range(min(limit, len(dataset))))
+    return DataLoader(dataset, batch_size, shuffle=shuffle, num_workers=workers, collate_fn=collate, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)
