@@ -1,13 +1,15 @@
 import os
-from dotenv import load_dotenv
-import cv2
 import time
-from monocular_vision.logging_utils import setup_logging, get_logger
 
-load_dotenv()
+import cv2
+import matplotlib
+import numpy as np
+
+from monocular_vision.logging_utils import setup_logging, get_logger
 from monocular_vision.process_frame import FrameProcessor
 
-load_dotenv()
+# Spectral_r as a 256-entry BGR lookup, built once instead of per frame.
+_DEPTH_LUT = (matplotlib.colormaps["Spectral_r"](np.arange(256))[:, 2::-1] * 255).astype(np.uint8)
 
 def _resize_for_processing(frame, max_width=1920, max_height=1080):
     height, width = frame.shape[:2]
@@ -27,15 +29,10 @@ def _make_output_path(video_path, timestamp):
 
 
 def _depth_to_bgr(depth_map):
-    import numpy as np
-    import matplotlib
     lo, hi = depth_map.min(), depth_map.max()
     if hi - lo < 1e-6:
         return None
-    norm = ((depth_map - lo) / (hi - lo) * 255).astype(np.uint8)
-    cmap = matplotlib.colormaps.get_cmap("Spectral_r")
-    rgb = (cmap(norm)[:, :, :3] * 255).astype(np.uint8)
-    return rgb[:, :, ::-1]  # RGB -> BGR for OpenCV
+    return _DEPTH_LUT[((depth_map - lo) / (hi - lo) * 255).astype(np.uint8)]
 
 
 def driver(
@@ -80,7 +77,10 @@ def driver(
     depth_writer = None
     if mode == "save" and output_path is None:
         output_path = _make_output_path(video_path, timestamp)
-    depth_output_path = output_path.replace(".mp4", "_depth.mp4") if output_path else None
+    depth_output_path = None
+    if output_path:
+        stem, ext = os.path.splitext(output_path)
+        depth_output_path = f"{stem}_depth{ext or '.mp4'}"
 
     logger.info(f"Starting video processing: {video_path} ({mode})")
     logger.info(
@@ -150,6 +150,9 @@ def driver(
                 if depth_writer is None:
                     dh, dw = depth_vis.shape[:2]
                     depth_writer = cv2.VideoWriter(depth_output_path, cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (dw, dh))
+                    if not depth_writer.isOpened():
+                        logger.error(f"Could not open depth video writer: {depth_output_path}")
+                        break
                 for _ in range(frame_stride):
                     depth_writer.write(depth_vis)
         else:
