@@ -1,14 +1,17 @@
 import math
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import torch
 
+from conftest import make_frame, yaw_pose
+from fsd.data import LidarFrame, LidarSweep
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.evaluate import _match
 from fsd.nmp.metrics import PlanMetrics, boxes_overlap, constant_velocity_plan, ego_footprint
-from fsd.nmp.model import NmpOutput
-from fsd.nmp.planner import decode_detections, select_plan
+from fsd.nmp.model import NeuralMotionPlanner, NmpOutput
+from fsd.nmp.planner import NmpPlanner, decode_detections, select_plan
 from fsd.nmp.samples import CLASS_NAMES
 from fsd.object_detection import Box3D
 
@@ -128,3 +131,11 @@ def test_plan_beyond_the_grid_is_not_counted_off_road():
     metrics = PlanMetrics()
     metrics.add(plan, plan, np.zeros((0, T + 1, 5), np.float32), np.zeros((0, T + 1), bool), np.ones(CFG.grid.shape, bool), CFG)
     assert metrics.summary()["offroad_3s"] == 0.0
+
+
+def test_planner_waits_for_the_full_lidar_history(tmp_path):
+    # Training never saw a partial history (those keyframes are skipped), so inference doesn't plan on one.
+    torch.save({"model": NeuralMotionPlanner(CFG).state_dict()}, tmp_path / "w.pt")
+    planner = NmpPlanner(tmp_path / "w.pt", CFG, device="cpu")
+    lidar = LidarFrame(tuple(LidarSweep(Path("x.bin"), -50_000 * i, yaw_pose(), yaw_pose()) for i in range(CFG.history_sweeps - 1)))
+    assert planner.plan(make_frame(yaw_pose()), lidar, None) is None

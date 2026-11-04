@@ -58,3 +58,8 @@ def test_render_with_front_camera(tmp_path):
     plan[:, 0] = 5.0 * CFG.times
     image = render_planner_bev(frame, np.zeros((0, 3)), _result(plan), CFG.grid, logged=plan)
     assert image.dtype == np.uint8 and image.shape[2] == 3
+
+
+def test_render_without_a_plan_while_history_fills():
+    image = render_planner_bev(make_frame(yaw_pose()), np.zeros((0, 3)), None, CFG.grid)
+    assert image.dtype == np.uint8 and image.shape[2] == 3
