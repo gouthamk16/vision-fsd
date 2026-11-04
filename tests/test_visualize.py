@@ -2,7 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from fsd.visualize import LSS_VIEWS, VIEWS, _output_paths, _select_views, parse_args
+from conftest import yaw_pose
+from fsd.bev import BevGrid
+from fsd.data import LidarFrame, LidarSweep
+from fsd.visualize import LSS_VIEWS, VIEWS, _Context, _output_paths, _Products, _select_views, parse_args
 
 
 def test_all_skips_lss_views_without_weights():
@@ -27,3 +30,9 @@ def test_output_paths_suffix_a_shared_base_per_view():
 def test_scene_range_and_frames_args():
     opts = parse_args(["--scenes", "2-4", "--frames", "all", "--save"])
     assert opts.scenes == [2, 3, 4] and opts.frames is None and not opts.stream
+
+
+def test_views_draw_only_the_requested_sweeps_of_a_longer_planner_history():
+    history = LidarFrame(tuple(LidarSweep(Path(f"{i}.bin"), -i, yaw_pose(), yaw_pose()) for i in range(19)))
+    ctx = _Context(BevGrid(), BevGrid(), 640, 80.0, 1, 0.5, lidar_sweeps=2)
+    assert len(_Products(None, history, ctx).view_lidar.sweeps) == 2

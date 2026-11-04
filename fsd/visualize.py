@@ -18,7 +18,6 @@ from fsd.draw import with_header
 from fsd.fusion_detect import FrustumFusionDetector, render_fusion_bev, render_fusion_cameras
 from fsd.lidar_projection import lidar_points_ego, render_lidar_projection_sheet
 from fsd.lss import LSSInference, overlay_lss, render_lss_bev
-from fsd.nmp.config import NmpConfig
 from fsd.nmp.planner import NmpPlanner
 from fsd.nmp.render import render_planner_bev
 from fsd.nuscenes_map import NuScenesMapRenderer
@@ -62,9 +61,13 @@ class _Products:
         self.frame, self.lidar, self.ctx = frame, lidar, ctx
 
     @cached_property
+    def view_lidar(self) -> LidarFrame:
+        """The sweeps views draw: the planner may have loaded more history than --lidar-sweeps."""
+        return LidarFrame(self.lidar.sweeps[: self.ctx.lidar_sweeps])
+
+    @cached_property
     def points(self) -> np.ndarray:
-        # The planner may have loaded more history than the views should draw.
-        return lidar_points_ego(LidarFrame(self.lidar.sweeps[: self.ctx.lidar_sweeps]))
+        return lidar_points_ego(self.view_lidar)
 
     @cached_property
     def occupancy(self) -> np.ndarray:
@@ -98,7 +101,7 @@ def _planner(p: _Products, c: _Context) -> np.ndarray:
 
 RENDERERS: dict[str, Callable[[_Products, _Context], np.ndarray]] = {
     "cameras": lambda p, c: render_contact_sheet(p.frame, c.tile_width),
-    "lidar": lambda p, c: render_lidar_projection_sheet(p.frame, p.lidar, p.points, c.tile_width, c.max_depth, c.point_radius),
+    "lidar": lambda p, c: render_lidar_projection_sheet(p.frame, p.view_lidar, p.points, c.tile_width, c.max_depth, c.point_radius),
     "bev": lambda p, c: render_lidar_bev(p.frame, p.points, c.view, p.dark_map),
     "lss_bev": lambda p, c: render_lss_bev(p.frame, p.lss, c.view, c.map_renderer, c.lss_threshold),
     "lss_lidar_bev": _lss_lidar,
@@ -151,7 +154,7 @@ def _frames(loader: NuScenesSceneLoader, opts: argparse.Namespace, needs_lidar: 
     for i, scene_index in enumerate([0] if opts.scene_name else opts.scenes):
         start = opts.start_sample_index if i == 0 else 0
         if opts.sequence == "sweeps" and opts.view == "planner_bev":
-            yield from loader.iter_lidar_sweep_frames(scene_index, opts.frames, opts.scene_name, sweeps, PLANNER_SWEEP_STRIDE)
+            yield from loader.iter_lidar_sweep_frames(scene_index, start, opts.frames, opts.scene_name, sweeps, PLANNER_SWEEP_STRIDE)
         elif opts.sequence == "sweeps":
             for frame in loader.iter_camera_sweep_frames(scene_index, start, opts.frames, opts.scene_name):
                 yield frame, None
@@ -207,7 +210,7 @@ def run_visualizer(opts: argparse.Namespace) -> list[Path]:
     sink = _Sink(opts, views)
     rendered = 0
     try:
-        sweeps = max(opts.lidar_sweeps, NmpConfig().history_sweeps) if ctx.planner else opts.lidar_sweeps
+        sweeps = max(opts.lidar_sweeps, ctx.planner.cfg.history_sweeps) if ctx.planner else opts.lidar_sweeps
         for frame, lidar in _frames(loader, opts, any(v not in CAMERA_ONLY_VIEWS for v in views), sweeps):
             products = _Products(frame, lidar, ctx)
             for view in views:

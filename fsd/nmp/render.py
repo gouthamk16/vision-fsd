@@ -24,7 +24,7 @@ from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 from fsd.bev import BevGrid
 from fsd.contact_sheet import read_image
 from fsd.data import CameraFrame, SurroundFrame
-from fsd.ego_motion import EGO_FOOTPRINT
+from fsd.nmp.metrics import ego_footprint
 from fsd.nmp.planner import PlanResult
 from fsd.nuscenes_map import NuScenesMapRenderer
 
@@ -48,8 +48,7 @@ MAP_STYLE = {
 }
 HALO = [patheffects.withStroke(linewidth=2.5, foreground="white")]
 LINE_HALO = [patheffects.Stroke(linewidth=5.5, foreground="white"), patheffects.Normal()]
-_X, _Y = EGO_FOOTPRINT
-EGO_BODY = np.array([[_X[1], _Y[1]], [_X[1], _Y[0]], [_X[0], _Y[0]], [_X[0], _Y[1]]])
+EGO_BODY = ego_footprint(np.zeros(3))
 
 
 def _uv(xy: np.ndarray) -> np.ndarray:
