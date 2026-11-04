@@ -228,11 +228,14 @@ class NuScenesSceneLoader:
     def iter_lidar_sweep_frames(
         self, scene_index: int = 0, max_frames: int | None = None, scene_name: str | None = None, lidar_sweeps: int = 1, stride: int = 1
     ) -> Iterator[tuple[SurroundFrame, LidarFrame]]:
-        """Yield every `stride`-th LIDAR_TOP sweep (20 Hz / stride) as a frame without cameras, with its history."""
+        """Yield every `stride`-th LIDAR_TOP sweep (20 Hz / stride) with its history and the nearest CAM_FRONT image."""
         scene = self.scene(scene_index, scene_name)
+        cameras = self.index.sweeps[scene["token"]]["CAM_FRONT"]
+        camera_times = np.array([r["timestamp"] for r in cameras])
         for i, record in enumerate(self.index.sweeps[scene["token"]][LIDAR_TOP][::stride][:max_frames]):
             lidar = self._lidar_frame(scene, record, lidar_sweeps)
-            frame = SurroundFrame(scene["token"], scene["name"], scene["location"], record["sample_token"], i, record["timestamp"], lidar.ego_pose, {}, record["is_key_frame"])
+            front = self._camera_frame("CAM_FRONT", cameras[int(np.abs(camera_times - record["timestamp"]).argmin())])
+            frame = SurroundFrame(scene["token"], scene["name"], scene["location"], record["sample_token"], i, record["timestamp"], lidar.ego_pose, {"CAM_FRONT": front}, record["is_key_frame"])
             yield frame, lidar
 
     def _ego_pose(self, record: dict[str, Any]) -> Pose:

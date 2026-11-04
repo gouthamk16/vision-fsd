@@ -76,10 +76,14 @@ def _loader_with_sweeps(n: int, period_us: int):
     ]
     loader = NuScenesSceneLoader.__new__(NuScenesSceneLoader)
     loader.dataroot = Path("root")
+    cameras = [  # CAM_FRONT at ~12 Hz
+        {"timestamp": t, "ego_pose_token": "p0", "calibrated_sensor_token": "c", "is_key_frame": False, "filename": f"cam{t}.jpg"}
+        for t in range(0, n * period_us, 83_000)
+    ]
     loader.index = SimpleNamespace(
-        sweeps={"scene": {LIDAR_TOP: records}},
+        sweeps={"scene": {LIDAR_TOP: records, "CAM_FRONT": cameras}},
         ego_poses={f"p{i}": {"translation": [i * period_us / 1e6, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0]} for i in range(n)},
-        calibrated_sensors={"c": {"translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0]}},
+        calibrated_sensors={"c": {"translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "camera_intrinsic": np.eye(3).tolist()}},
     )
     loader.scenes = [{"token": "scene", "name": "scene-x", "location": "boston-seaport"}]
     loader._lidar_position = {r["token"]: i for i, r in enumerate(records)}
@@ -98,3 +102,4 @@ def test_lidar_sweep_frames_every_stride_with_history():
     assert [f.timestamp_us for f, _ in frames] == [0, 100_000, 200_000, 300_000]
     assert [len(lidar.sweeps) for _, lidar in frames] == [1, 3, 3, 3]
     assert frames[2][0].ego_pose.translation[0] == 0.2 and frames[0][0].is_key_frame
+    assert [f.cameras["CAM_FRONT"].timestamp_us for f, _ in frames] == [0, 83_000, 166_000, 332_000]
