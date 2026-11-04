@@ -171,6 +171,14 @@ class NuScenesSceneLoader:
             raise IndexError(f"Sample index {start} is beyond scene length {len(samples)}")
         return samples[start:] if max_frames is None else samples[start:start + max_frames]
 
+    def future_ego_poses(self, frame: SurroundFrame, steps: int, step_s: float = 0.5) -> list[Pose]:
+        """Logged global ego poses every `step_s` after `frame`, from the 20 Hz LiDAR; fewer near the scene end."""
+        records = self.index.sweeps[frame.scene_token][LIDAR_TOP]
+        times = np.array([r["timestamp"] for r in records])
+        targets = frame.timestamp_us + step_s * 1e6 * np.arange(1, steps + 1)
+        nearest = np.abs(times[:, None] - targets[targets <= times[-1]]).argmin(axis=0)
+        return [self._ego_pose(records[i]) for i in nearest]
+
     def iter_scene_frames(
         self,
         scene_index: int = 0,
@@ -216,6 +224,26 @@ class NuScenesSceneLoader:
                 timestamp_us=target["timestamp"],
                 is_key_frame=all(r["is_key_frame"] for r in records.values()),
             )
+
+    def iter_lidar_sweep_frames(
+        self,
+        scene_index: int = 0,
+        start_frame_index: int = 0,
+        max_frames: int | None = None,
+        scene_name: str | None = None,
+        lidar_sweeps: int = 1,
+        stride: int = 1,
+    ) -> Iterator[tuple[SurroundFrame, LidarFrame]]:
+        """Yield every `stride`-th LIDAR_TOP sweep (20 Hz / stride) with its history and the nearest CAM_FRONT image."""
+        scene = self.scene(scene_index, scene_name)
+        cameras = self.index.sweeps[scene["token"]]["CAM_FRONT"]
+        camera_times = np.array([r["timestamp"] for r in cameras])
+        records = self.index.sweeps[scene["token"]][LIDAR_TOP][::stride][start_frame_index:]
+        for i, record in enumerate(records[:max_frames], start_frame_index):
+            lidar = self._lidar_frame(scene, record, lidar_sweeps)
+            front = self._camera_frame("CAM_FRONT", cameras[int(np.abs(camera_times - record["timestamp"]).argmin())])
+            frame = SurroundFrame(scene["token"], scene["name"], scene["location"], record["sample_token"], i, record["timestamp"], lidar.ego_pose, {"CAM_FRONT": front}, record["is_key_frame"])
+            yield frame, lidar
 
     def _ego_pose(self, record: dict[str, Any]) -> Pose:
         return Pose.from_record(self.index.ego_poses[record["ego_pose_token"]])

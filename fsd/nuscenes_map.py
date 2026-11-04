@@ -12,6 +12,11 @@ import numpy as np
 from fsd.bev import SHIFT, BevGrid, canvas, fixed_point
 from fsd.data import SurroundFrame
 
+# Channel order of `layer_masks`, the planner's map input.
+MAP_LAYERS = ("drivable_area", "lane", "ped_crossing", "walkway", "stop_line", "carpark_area", "road_divider", "lane_divider")
+_LINE_LAYERS = {"road_divider", "lane_divider"}
+_POLYGON_LAYERS = ("walkway", "ped_crossing", "lane", "stop_line", "carpark_area")
+
 # (fill layers, line layers) drawn in order; BGR.
 _PALETTES = {
     "light": (
@@ -52,6 +57,29 @@ class NuScenesMapRenderer:
 
     def draw(self, image: np.ndarray, frame: SurroundFrame, grid: BevGrid, dark: bool = False, fill: bool = True) -> None:
         fills, lines, _ = _PALETTES["dark" if dark else "light"]
+        visible = self._visible(frame, grid)
+        if fill:
+            for name, color in fills.items():
+                for contours in visible(name):
+                    cv2.fillPoly(image, contours, color, cv2.LINE_AA, SHIFT)
+        for name, color in lines.items():
+            for (line,) in visible(name):
+                cv2.polylines(image, [line], False, color, 1, cv2.LINE_AA, SHIFT)
+
+    def layer_masks(self, frame: SurroundFrame, grid: BevGrid, layers: tuple[str, ...] = MAP_LAYERS) -> np.ndarray:
+        """Binary (len(layers), H, W) masks; lines are drawn 2 px wide so they survive coarse grids."""
+        visible = self._visible(frame, grid)
+        masks = np.zeros((len(layers), *grid.shape), dtype=np.uint8)
+        for mask, name in zip(masks, layers):
+            for shapes in visible(name):
+                if name in _LINE_LAYERS:
+                    cv2.polylines(mask, shapes, False, 1, 2, cv2.LINE_8, SHIFT)
+                else:
+                    cv2.fillPoly(mask, shapes, 1, cv2.LINE_8, SHIFT)
+        return masks
+
+    def _visible(self, frame: SurroundFrame, grid: BevGrid):
+        """Generator factory: a layer's shapes overlapping the view, in fixed-point grid pixels."""
         layers = self._load(frame.location)
         rot = frame.ego_pose.rotation[:2, :2]
         origin = frame.ego_pose.translation[:2]
@@ -64,13 +92,7 @@ class NuScenesMapRenderer:
             for i in np.flatnonzero(hit):
                 yield [fixed_point(grid, (pts - origin) @ rot) for pts in layer.shapes[i]]
 
-        if fill:
-            for name, color in fills.items():
-                for contours in visible(name):
-                    cv2.fillPoly(image, contours, color, cv2.LINE_AA, SHIFT)
-        for name, color in lines.items():
-            for (line,) in visible(name):
-                cv2.polylines(image, [line], False, color, 1, cv2.LINE_AA, SHIFT)
+        return visible
 
     def _load(self, location: str) -> dict[str, _Layer]:
         if location not in self._layers:
@@ -86,13 +108,10 @@ class NuScenesMapRenderer:
                 rings = [poly["exterior_node_tokens"], *(hole["node_tokens"] for hole in poly.get("holes", []))]
                 return [np.array([nodes[t] for t in ring]) for ring in rings if len(ring) >= 3]
 
-            items = {
-                "drivable_area": [polygon(t) for record in data["drivable_area"] for t in record["polygon_tokens"]],
-                "walkway": [polygon(r["polygon_token"]) for r in data["walkway"]],
-                "ped_crossing": [polygon(r["polygon_token"]) for r in data["ped_crossing"]],
-                "road_divider": [[np.array([nodes[t] for t in lines[r["line_token"]]["node_tokens"]])] for r in data["road_divider"]],
-                "lane_divider": [[np.array([nodes[t] for t in lines[r["line_token"]]["node_tokens"]])] for r in data["lane_divider"]],
-            }
+            items = {name: [polygon(r["polygon_token"]) for r in data.get(name, [])] for name in _POLYGON_LAYERS}
+            items["drivable_area"] = [polygon(t) for record in data["drivable_area"] for t in record["polygon_tokens"]]
+            for name in _LINE_LAYERS:
+                items[name] = [[np.array([nodes[t] for t in lines[r["line_token"]]["node_tokens"]])] for r in data.get(name, [])]
             self._layers[location] = {name: _layer([s for s in shapes if s and len(s[0]) >= 2]) for name, shapes in items.items()}
         return self._layers[location]
 

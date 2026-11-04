@@ -74,6 +74,22 @@ The only hard part is knowing which object in this frame is the *same* object fr
 
 When we check the real way against the answer key on scene 0, the speeds agree to within about **0.25 m/s** - basically identical - so tracking real detections works nearly as well as the labelled baseline. In the `world_bev` view each moving object gets an arrow (where it is heading), a faint outline (where it will be in 3 seconds), and a speed tag like `5.2 m/s`. Pass `--predictions` to also show the detector's version. Implementation in [fsd/tracking.py](fsd/tracking.py).
 
+### Neural motion planner
+
+A learned planner after [Zeng et al., CVPR 2019](https://arxiv.org/abs/2101.06679). One convolutional network reads 10 LiDAR sweeps and 8 HD-map layers on a 140.8 x 80 m grid and outputs two things: vehicle detections with 3 s forecasts, and a **cost volume** - one cost map per future half second. Planning samples 1000 physically plausible trajectories (straight lines, circles and clothoids) and picks the one with the lowest summed cost. Nobody hand-writes the cost: training only says that the driven trajectory must be cheaper than every sampled one, by a margin that grows when the sample collides with a vehicle or leaves the road.
+
+Trained 20 epochs on 139 nuScenes train scenes (4,396 samples), evaluated on the 31 official val scenes we have (983 samples). Collision and off-road rates are cumulative up to each horizon:
+
+| method | L2 1/2/3 s (m) | collision 1/2/3 s (%) | off-road 3 s (%) |
+|---|---|---|---|
+| human driver (logged) | 0 / 0 / 0 | 0.00 / 0.00 / 0.00 | 0.00 |
+| constant velocity | 0.40 / 1.16 / 2.33 | 0.00 / 0.41 / 2.24 | 5.70 |
+| **NMP, last epoch** | 0.47 / 1.59 / 3.49 | 0.00 / 0.00 / 1.12 | 0.00 |
+| NMP, best epoch by val collision (17) | 0.47 / 1.57 / 3.44 | 0.00 / 0.00 / 0.61 | 0.10 |
+| NMP reference ([Khurana et al., ECCV 2022](https://arxiv.org/abs/2210.01917), full val, no map) | 0.53 / 1.25 / 2.67 | 0.04 / 0.12 / 0.87 | - |
+
+The last epoch is the honest number; the best epoch was picked on the same val split, so its collision rate is optimistic. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), and it travels 18 m in 3 s against the human's 19 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m within 50 m is 0.44. Implementation in [fsd/nmp/](fsd/nmp/).
+
 ### Results
 
 <table>
@@ -109,6 +125,12 @@ When we check the real way against the answer key on scene 0, the speeds agree t
   </tr>
   <tr>
     <td colspan="2" align="center">
+      <img src="results/nuscenes_planner_bev.jpg" width="100%"><br>
+      <sub>Neural motion planner on an unseen val scene (right turn, 10 Hz) - left: the chosen 3 s plan (green) against what the human actually drove (orange, dashed), rejected samples (light blue) and detected vehicles with 3 s forecasts (blue); right: both paths projected into the front camera, and the learned cost the plan minimises at 1, 2 and 3 s (dark = preferred)</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
       <img src="results/nuscenes_height_bev.jpg" width="100%"><br>
       <sub>2.5D BEV tensor - per-cell point density and min/max/mean/range height channels (one panel each)</sub>
     </td>
@@ -138,6 +160,19 @@ python -m fsd.visualize --view bev --lidar-sweeps 10 --save
 
 # Smoother video using raw camera sweeps (~12 Hz instead of 2 Hz keyframes)
 python -m fsd.visualize --view cameras --sequence sweeps --frames all --save
+```
+
+Neural motion planner - build the sample cache once, train, evaluate, then view:
+
+```bash
+python -m fsd.nmp.train cache --split val      # ~2 min
+python -m fsd.nmp.train cache --split train    # ~9 min, ~1 GB in ~/.cache/vision-fsd/nmp
+python -m fsd.nmp.train fit                    # 20 epochs, ~3 h on an 8 GB laptop GPU
+python -m fsd.nmp.train eval --weights checkpoints/nmp/best.pt
+python -m fsd.visualize --view planner_bev --nmp-weights checkpoints/nmp/best.pt --scene-name scene-0003 --save
+
+# Plan at 10 Hz on LiDAR sweeps instead of 2 Hz keyframes, over five consecutive val scenes (~100 s)
+python -m fsd.visualize --view planner_bev --nmp-weights checkpoints/nmp/best.pt --sequence sweeps --scenes 75-79 --frames all --fps 10 --save
 ```
 
 nuScenes data is read from `C:/nuscenes` (override with `--dataroot` or `NUSCENES_ROOT`). Extract the official archives straight into that root, which gives the flat devkit layout:
@@ -241,7 +276,7 @@ pip install -r requirements.txt
 pytest tests/
 ```
 
-Covers the data layer, BEV geometry, occupancy, tracking, detection geometry, the map renderer and view selection. No GPU or dataset needed.
+Covers the data layer, BEV geometry, occupancy, tracking, detection geometry, the map renderer, view selection, and the neural motion planner (sampler, samples, dataset, model, losses, metrics and a small overfit run of training). No GPU or dataset needed.
 
 ## Models
 
@@ -251,6 +286,7 @@ Covers the data layer, BEV geometry, occupancy, tracking, detection geometry, th
 | `yolopv2.pt` | ~70 MB | Auto-downloaded from GitHub releases on first run |
 | DepthAnything V2 (metric outdoor large) | ~335 MB | Auto-downloaded from HuggingFace on first run |
 | Lift-Splat-Shoot BEV vehicle seg (`model525000.pt`) | ~55 MB | Manual: [Google Drive](https://drive.google.com/file/d/1bsUYveW_eOqa4lglryyGQNeC4fyQWvQQ/view?usp=sharing), drop into `models/` and pass via `--lss-weights` |
+| Neural motion planner (`checkpoints/nmp/best.pt`) | ~40 MB | Trained locally with `python -m fsd.nmp.train fit`; pass via `--nmp-weights` |
 
 ## Todo
 

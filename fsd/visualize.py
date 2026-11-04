@@ -18,6 +18,8 @@ from fsd.draw import with_header
 from fsd.fusion_detect import FrustumFusionDetector, render_fusion_bev, render_fusion_cameras
 from fsd.lidar_projection import lidar_points_ego, render_lidar_projection_sheet
 from fsd.lss import LSSInference, overlay_lss, render_lss_bev
+from fsd.nmp.planner import NmpPlanner
+from fsd.nmp.render import render_planner_bev
 from fsd.nuscenes_map import NuScenesMapRenderer
 from fsd.object_detection import NuScenesAnnotationLoader, PredictionLoader
 from fsd.occupancy import TemporalOccupancyMapper, render_occupancy_bev
@@ -25,7 +27,9 @@ from fsd.world_model import WorldModelBuilder, render_world_model_bev
 
 LSS_VIEWS = {"lss_bev", "lss_lidar_bev"}
 CAMERA_ONLY_VIEWS = {"cameras", "lss_bev"}
-MAP_VIEWS = {"bev", "lss_bev", "objects_bev", "world_bev"}
+MAP_VIEWS = {"bev", "lss_bev", "objects_bev", "world_bev", "planner_bev"}
+# planner_bev over LiDAR sweeps plans at 10 Hz: 5x the keyframe rate at half the render cost of 20 Hz.
+PLANNER_SWEEP_STRIDE = 2
 
 
 @dataclass
@@ -38,11 +42,16 @@ class _Context:
     max_depth: float
     point_radius: int
     lss_threshold: float
+    lidar_sweeps: int
     mapper: TemporalOccupancyMapper | None = None
     world: WorldModelBuilder | None = None
     detector: FrustumFusionDetector | None = None
     lss: LSSInference | None = None
     map_renderer: NuScenesMapRenderer | None = None
+    planner: NmpPlanner | None = None
+    # The planner's map input is needed even when the map background is off (--no-map).
+    planner_map: NuScenesMapRenderer | None = None
+    loader: NuScenesSceneLoader | None = None
 
 
 class _Products:
@@ -52,8 +61,13 @@ class _Products:
         self.frame, self.lidar, self.ctx = frame, lidar, ctx
 
     @cached_property
+    def view_lidar(self) -> LidarFrame:
+        """The sweeps views draw: the planner may have loaded more history than --lidar-sweeps."""
+        return LidarFrame(self.lidar.sweeps[: self.ctx.lidar_sweeps])
+
+    @cached_property
     def points(self) -> np.ndarray:
-        return lidar_points_ego(self.lidar)
+        return lidar_points_ego(self.view_lidar)
 
     @cached_property
     def occupancy(self) -> np.ndarray:
@@ -78,9 +92,16 @@ def _lss_lidar(p: _Products, c: _Context) -> np.ndarray:
     return with_header(image, f"{p.frame.scene_name} | sample {p.frame.sample_index} | LSS (cyan) over LiDAR BEV")
 
 
+def _planner(p: _Products, c: _Context) -> np.ndarray:
+    result = c.planner.plan(p.frame, p.lidar, c.planner_map)
+    future = [pose.relative_to(p.frame.ego_pose) for pose in c.loader.future_ego_poses(p.frame, c.planner.cfg.horizon)]
+    logged = np.array([[q.translation[0], q.translation[1], q.yaw] for q in future]) if future else None
+    return render_planner_bev(p.frame, p.points, result, c.planner.cfg.grid, c.map_renderer, logged)
+
+
 RENDERERS: dict[str, Callable[[_Products, _Context], np.ndarray]] = {
     "cameras": lambda p, c: render_contact_sheet(p.frame, c.tile_width),
-    "lidar": lambda p, c: render_lidar_projection_sheet(p.frame, p.lidar, p.points, c.tile_width, c.max_depth, c.point_radius),
+    "lidar": lambda p, c: render_lidar_projection_sheet(p.frame, p.view_lidar, p.points, c.tile_width, c.max_depth, c.point_radius),
     "bev": lambda p, c: render_lidar_bev(p.frame, p.points, c.view, p.dark_map),
     "lss_bev": lambda p, c: render_lss_bev(p.frame, p.lss, c.view, c.map_renderer, c.lss_threshold),
     "lss_lidar_bev": _lss_lidar,
@@ -89,21 +110,25 @@ RENDERERS: dict[str, Callable[[_Products, _Context], np.ndarray]] = {
     "objects_bev": lambda p, c: render_fusion_bev(p.frame, p.points, p.detections, c.view, p.dark_map),
     "objects_cameras": lambda p, c: render_fusion_cameras(p.frame, p.detections, c.tile_width),
     "world_bev": lambda p, c: render_world_model_bev(c.world.step(p.frame, p.occupancy), c.raster, c.view, c.map_renderer),
+    "planner_bev": _planner,
 }
 VIEWS = tuple(RENDERERS)
 
 
-def _select_views(view: str, lss_weights: str | None) -> list[str]:
+def _select_views(view: str, lss_weights: str | None, nmp_weights: str | None) -> list[str]:
+    missing = {v: "--lss-weights" for v in LSS_VIEWS if not lss_weights}
+    if not nmp_weights:
+        missing["planner_bev"] = "--nmp-weights"
     if view != "all":
-        if view in LSS_VIEWS and not lss_weights:
-            raise ValueError(f"--lss-weights is required for {view}")
+        if view in missing:
+            raise ValueError(f"{missing[view]} is required for {view}")
         return [view]
-    return [v for v in VIEWS if lss_weights or v not in LSS_VIEWS]
+    return [v for v in VIEWS if v not in missing]
 
 
 def _build_context(views: list[str], loader: NuScenesSceneLoader, opts: argparse.Namespace) -> _Context:
     raster = BevGrid(resolution=opts.bev_resolution)
-    ctx = _Context(raster, raster.with_resolution(1.0 / opts.bev_ppm), opts.tile_width, opts.max_depth, opts.point_radius, opts.lss_threshold)
+    ctx = _Context(raster, raster.with_resolution(1.0 / opts.bev_ppm), opts.tile_width, opts.max_depth, opts.point_radius, opts.lss_threshold, opts.lidar_sweeps)
     if {"occupancy_bev", "world_bev"} & set(views):
         ctx.mapper = TemporalOccupancyMapper(raster)
     if "world_bev" in views:
@@ -118,17 +143,23 @@ def _build_context(views: list[str], loader: NuScenesSceneLoader, opts: argparse
             ctx.map_renderer = NuScenesMapRenderer(loader.dataroot)
         except FileNotFoundError as exc:
             print(f"Map disabled: {exc}")
+    if "planner_bev" in views:
+        ctx.planner = NmpPlanner(opts.nmp_weights)
+        ctx.planner_map = ctx.map_renderer or NuScenesMapRenderer(loader.dataroot)
+        ctx.loader = loader
     return ctx
 
 
-def _frames(loader: NuScenesSceneLoader, opts: argparse.Namespace, needs_lidar: bool) -> Iterator[tuple[SurroundFrame, LidarFrame | None]]:
+def _frames(loader: NuScenesSceneLoader, opts: argparse.Namespace, needs_lidar: bool, sweeps: int) -> Iterator[tuple[SurroundFrame, LidarFrame | None]]:
     for i, scene_index in enumerate([0] if opts.scene_name else opts.scenes):
         start = opts.start_sample_index if i == 0 else 0
-        if opts.sequence == "sweeps":
+        if opts.sequence == "sweeps" and opts.view == "planner_bev":
+            yield from loader.iter_lidar_sweep_frames(scene_index, start, opts.frames, opts.scene_name, sweeps, PLANNER_SWEEP_STRIDE)
+        elif opts.sequence == "sweeps":
             for frame in loader.iter_camera_sweep_frames(scene_index, start, opts.frames, opts.scene_name):
                 yield frame, None
         else:
-            yield from loader.iter_scene_frames(scene_index, start, opts.frames, opts.scene_name, needs_lidar, opts.lidar_sweeps)
+            yield from loader.iter_scene_frames(scene_index, start, opts.frames, opts.scene_name, needs_lidar, sweeps)
 
 
 def _output_paths(output: str | None, views: list[str]) -> dict[str, Path]:
@@ -171,15 +202,16 @@ class _Sink:
 
 def run_visualizer(opts: argparse.Namespace) -> list[Path]:
     """Render the requested views; returns the MP4s written (none when streaming)."""
-    if opts.sequence == "sweeps" and opts.view != "cameras":
-        raise ValueError("--sequence sweeps supports --view cameras only")
-    views = _select_views(opts.view, opts.lss_weights)
+    if opts.sequence == "sweeps" and opts.view not in ("cameras", "planner_bev"):
+        raise ValueError("--sequence sweeps supports --view cameras or planner_bev only")
+    views = _select_views(opts.view, opts.lss_weights, opts.nmp_weights)
     loader = NuScenesSceneLoader(dataroot=opts.dataroot)
     ctx = _build_context(views, loader, opts)
     sink = _Sink(opts, views)
     rendered = 0
     try:
-        for frame, lidar in _frames(loader, opts, any(v not in CAMERA_ONLY_VIEWS for v in views)):
+        sweeps = max(opts.lidar_sweeps, ctx.planner.cfg.history_sweeps) if ctx.planner else opts.lidar_sweeps
+        for frame, lidar in _frames(loader, opts, any(v not in CAMERA_ONLY_VIEWS for v in views), sweeps):
             products = _Products(frame, lidar, ctx)
             for view in views:
                 sink.show(view, RENDERERS[view](products, ctx))
@@ -214,7 +246,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--start-sample-index", type=int, default=0, help="First keyframe or sweep index (first scene only).")
     parser.add_argument("--frames", type=_frames_arg, default=20, help="Max frames per scene, or 'all'.")
     parser.add_argument("--view", choices=VIEWS + ("all",), default="lidar")
-    parser.add_argument("--sequence", choices=("keyframes", "sweeps"), default="keyframes", help="Key samples, or every camera sweep (cameras view only).")
+    parser.add_argument("--sequence", choices=("keyframes", "sweeps"), default="keyframes", help="Key samples (2 Hz), or sweeps: every camera image for cameras, 10 Hz LiDAR for planner_bev.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--save", action="store_true", help="Save one MP4 per view (the default).")
     mode.add_argument("--stream", action="store_true", help="Show in a window instead of saving MP4s.")
@@ -232,6 +264,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lss-weights", default=None, help="Pretrained LSS vehicle-seg checkpoint (required for LSS views).")
     parser.add_argument("--lss-threshold", type=float, default=0.4, help="LSS probability threshold for overlays.")
     parser.add_argument("--lss-device", default=None, help="Device for LSS, e.g. 'cuda' or 'cpu'.")
+    parser.add_argument("--nmp-weights", default=None, help="Neural motion planner checkpoint (required for planner_bev).")
     parser.add_argument("--no-map", action="store_true", help="Disable the HD-map background.")
     parser.add_argument("--yolo-weights", default="yolo26n.pt", help="YOLO weights for the fusion detector.")
     parser.add_argument("--detector-device", default=None, help="Device for the fusion detector.")
