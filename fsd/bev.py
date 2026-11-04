@@ -1,141 +1,131 @@
+"""Ego-frame bird's-eye-view geometry and drawing.
+
+One convention for every BEV raster and view: x (forward) points up the image,
+y (left) points left, and pixel (0, 0) is the corner at (x_max, y_max).
+
+Rasters (occupancy, height) are computed on a coarse `BevGrid`; views render
+the same metric extent on a finer grid and draw vector overlays (points, boxes,
+map, text) directly at that resolution rather than upscaling a coarse image.
+"""
+
 from __future__ import annotations
+
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
 
-from fsd.data import LidarFrame, SurroundFrame
-from fsd.lidar_projection import load_lidar_points, transform_points
+from fsd.data import SurroundFrame
+from fsd.draw import FONT, colorize, splat, with_header
+from fsd.ego_motion import EGO_FOOTPRINT
+
+DARK_CANVAS = (20, 20, 20)
+SHIFT = 4  # cv2 fixed-point bits: sub-pixel accurate anti-aliased geometry
 
 
-def lidar_points_to_ego(lidar_points: np.ndarray, lidar: LidarFrame) -> np.ndarray:
-    """Transform LiDAR sensor-frame points into the ego-vehicle frame."""
-    return transform_points(
-        lidar_points,
-        lidar.calibrated_sensor["rotation"],
-        lidar.calibrated_sensor["translation"],
-    )
+@dataclass(frozen=True)
+class BevGrid:
+    x_range: tuple[float, float] = (-50.0, 50.0)
+    y_range: tuple[float, float] = (-50.0, 50.0)
+    resolution: float = 0.25  # metres per cell
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (
+            int(round((self.x_range[1] - self.x_range[0]) / self.resolution)),
+            int(round((self.y_range[1] - self.y_range[0]) / self.resolution)),
+        )
+
+    def with_resolution(self, resolution: float) -> BevGrid:
+        return replace(self, resolution=resolution)
+
+    def to_pixels(self, xy: np.ndarray) -> np.ndarray:
+        """Continuous (col, row) image coordinates of ego-frame (x, y) points."""
+        return np.stack(
+            [(self.y_range[1] - xy[:, 1]) / self.resolution, (self.x_range[1] - xy[:, 0]) / self.resolution],
+            axis=1,
+        )
+
+    def cells(self, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(rows, cols, inside) cell indices; floor, so points past an edge stay outside."""
+        px = np.floor(self.to_pixels(xy)).astype(np.int64)
+        h, w = self.shape
+        inside = (px[:, 1] >= 0) & (px[:, 1] < h) & (px[:, 0] >= 0) & (px[:, 0] < w)
+        return px[:, 1], px[:, 0], inside
 
 
-def _metric_to_pixel(
-    points_ego: np.ndarray,
-    x_range: tuple[float, float],
-    y_range: tuple[float, float],
-    resolution: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    x_min, x_max = x_range
-    y_min, y_max = y_range
-
-    valid = (
-        (points_ego[:, 0] >= x_min)
-        & (points_ego[:, 0] <= x_max)
-        & (points_ego[:, 1] >= y_min)
-        & (points_ego[:, 1] <= y_max)
-    )
-    points = points_ego[valid]
-
-    cols = ((y_max - points[:, 1]) / resolution).astype(np.int32)
-    rows = ((x_max - points[:, 0]) / resolution).astype(np.int32)
-    return rows, cols, points
+def resample(raster: np.ndarray, source: BevGrid, target: BevGrid, interpolation: int = cv2.INTER_LINEAR) -> np.ndarray:
+    """Warp a raster between grids by metric extent; cells outside `source` become 0."""
+    s = source.resolution / target.resolution
+    dc = (target.y_range[1] - source.y_range[1]) / target.resolution + 0.5 * s - 0.5
+    dr = (target.x_range[1] - source.x_range[1]) / target.resolution + 0.5 * s - 0.5
+    h, w = target.shape
+    affine = np.float32([[s, 0, dc], [0, s, dr]])
+    return cv2.warpAffine(raster, affine, (w, h), flags=interpolation, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
-def _draw_metric_grid(
-    image: np.ndarray,
-    x_range: tuple[float, float],
-    y_range: tuple[float, float],
-    resolution: float,
-    spacing_m: int = 10,
-) -> None:
-    x_min, x_max = x_range
-    y_min, y_max = y_range
-    height, width = image.shape[:2]
-
-    for x in range(int(np.ceil(x_min / spacing_m) * spacing_m), int(x_max) + 1, spacing_m):
-        row = int((x_max - x) / resolution)
-        if 0 <= row < height:
-            color = (60, 60, 60) if x != 0 else (110, 110, 110)
-            cv2.line(image, (0, row), (width - 1, row), color, 1)
-            cv2.putText(image, f"{x}m", (6, max(14, row - 3)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-
-    for y in range(int(np.ceil(y_min / spacing_m) * spacing_m), int(y_max) + 1, spacing_m):
-        col = int((y_max - y) / resolution)
-        if 0 <= col < width:
-            color = (60, 60, 60) if y != 0 else (110, 110, 110)
-            cv2.line(image, (col, 0), (col, height - 1), color, 1)
-            cv2.putText(image, f"{y}m", (max(2, col + 3), height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+def fixed_point(grid: BevGrid, xy: np.ndarray) -> np.ndarray:
+    return np.round(grid.to_pixels(xy) * (1 << SHIFT)).astype(np.int32).reshape(-1, 1, 2)
 
 
-def _draw_ego_vehicle(
-    image: np.ndarray,
-    x_range: tuple[float, float],
-    y_range: tuple[float, float],
-    resolution: float,
-) -> None:
-    _, x_max = x_range
-    _, y_max = y_range
-    row = int(x_max / resolution)
-    col = int(y_max / resolution)
+def draw_polygon(image: np.ndarray, grid: BevGrid, xy: np.ndarray, color, thickness: int = 1, fill: bool = False) -> None:
+    pts = fixed_point(grid, xy)
+    if fill:
+        cv2.fillPoly(image, [pts], color, cv2.LINE_AA, SHIFT)
+    else:
+        cv2.polylines(image, [pts], True, color, thickness, cv2.LINE_AA, SHIFT)
 
-    car_w = max(6, int(2.0 / resolution))
-    car_l = max(12, int(4.5 / resolution))
-    cv2.rectangle(
+
+def draw_arrow(image: np.ndarray, grid: BevGrid, start_xy, end_xy, color, thickness: int = 1) -> None:
+    (c0, r0), (c1, r1) = grid.to_pixels(np.array([start_xy, end_xy], dtype=np.float64))
+    cv2.arrowedLine(image, (int(c0), int(r0)), (int(c1), int(r1)), color, thickness, cv2.LINE_AA, tipLength=0.3)
+
+
+def draw_points(image: np.ndarray, grid: BevGrid, xy: np.ndarray, colors: np.ndarray, radius: int = 0) -> None:
+    splat(image, np.floor(grid.to_pixels(xy)).astype(np.int32), colors, radius)
+
+
+def draw_metric_grid(image: np.ndarray, grid: BevGrid, spacing_m: int = 10, dark: bool = True) -> None:
+    minor, major = ((48, 48, 48), (95, 95, 95)) if dark else ((222, 222, 222), (175, 175, 175))
+    h, w = image.shape[:2]
+    scale = float(np.clip(w / 2400.0, 0.35, 0.6))
+    for x in range(int(np.ceil(grid.x_range[0] / spacing_m)) * spacing_m, int(grid.x_range[1]) + 1, spacing_m):
+        row = int(round((grid.x_range[1] - x) / grid.resolution))
+        cv2.line(image, (0, row), (w - 1, row), major if x == 0 else minor, 1)
+        cv2.putText(image, f"{x}m", (4, row - 4), FONT, scale, major, 1, cv2.LINE_AA)
+    for y in range(int(np.ceil(grid.y_range[0] / spacing_m)) * spacing_m, int(grid.y_range[1]) + 1, spacing_m):
+        col = int(round((grid.y_range[1] - y) / grid.resolution))
+        cv2.line(image, (col, 0), (col, h - 1), major if y == 0 else minor, 1)
+
+
+def draw_ego(image: np.ndarray, grid: BevGrid, fill=(0, 200, 0), outline=(255, 255, 255)) -> None:
+    (x0, x1), (y0, y1) = EGO_FOOTPRINT
+    body = np.array([[x1, y1], [x1, y0], [x0, y0], [x0, y1]])
+    draw_polygon(image, grid, body, fill, fill=True)
+    draw_polygon(image, grid, body, outline)
+    draw_arrow(image, grid, ((x0 + x1) / 2, 0.0), (x1 + 2.0, 0.0), outline, 2)
+
+
+def canvas(grid: BevGrid, color=DARK_CANVAS) -> np.ndarray:
+    return np.full((*grid.shape, 3), color, dtype=np.uint8)
+
+
+def lidar_canvas(points: np.ndarray, grid: BevGrid, background: np.ndarray | None = None, z_range=(-2.0, 4.0)) -> np.ndarray:
+    """Points coloured by height over an optional map background, tallest drawn last."""
+    image = canvas(grid) if background is None else background.copy()
+    draw_metric_grid(image, grid)
+    points = points[(points[:, 2] >= z_range[0]) & (points[:, 2] <= z_range[1])]
+    points = points[np.argsort(points[:, 2])]
+    draw_points(image, grid, points, colorize(points[:, 2], *z_range, cv2.COLORMAP_TURBO), radius=1)
+    return image
+
+
+def render_lidar_bev(frame: SurroundFrame, points: np.ndarray, grid: BevGrid, background: np.ndarray | None = None) -> np.ndarray:
+    image = lidar_canvas(points, grid, background)
+    draw_ego(image, grid)
+    sweeps = len(np.unique(points[:, 3])) if points.shape[1] > 3 else 1
+    return with_header(
         image,
-        (col - car_w // 2, row - car_l // 2),
-        (col + car_w // 2, row + car_l // 2),
-        (220, 220, 240),
-        -1,
+        f"{frame.scene_name} | sample {frame.sample_index} | LiDAR BEV",
+        f"{len(points)} points from {sweeps} sweep(s), ego-motion compensated | colour = height (-2 to 4 m) | grid 10 m",
     )
-    cv2.rectangle(
-        image,
-        (col - car_w // 2, row - car_l // 2),
-        (col + car_w // 2, row + car_l // 2),
-        (90, 90, 130),
-        1,
-    )
-    cv2.arrowedLine(image, (col, row), (col, row - car_l), (255, 255, 255), 2, tipLength=0.35)
-
-
-def render_lidar_bev(
-    frame: SurroundFrame,
-    lidar: LidarFrame,
-    x_range: tuple[float, float] = (-50.0, 50.0),
-    y_range: tuple[float, float] = (-50.0, 50.0),
-    z_range: tuple[float, float] = (-3.0, 5.0),
-    resolution: float = 0.25,
-    scale: int = 2,
-) -> np.ndarray:
-    """Render a top-down ego-frame BEV from one LiDAR scan."""
-    lidar_points = load_lidar_points(lidar.pointcloud_path)
-    points_ego = lidar_points_to_ego(lidar_points, lidar)
-
-    z_min, z_max = z_range
-    height = int(round((x_range[1] - x_range[0]) / resolution))
-    width = int(round((y_range[1] - y_range[0]) / resolution))
-    canvas = np.full((height, width, 3), 20, dtype=np.uint8)
-    _draw_metric_grid(canvas, x_range, y_range, resolution)
-
-    valid_z = (points_ego[:, 2] >= z_min) & (points_ego[:, 2] <= z_max)
-    rows, cols, visible_points = _metric_to_pixel(points_ego[valid_z], x_range, y_range, resolution)
-
-    inside = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
-    rows = rows[inside]
-    cols = cols[inside]
-    visible_points = visible_points[inside]
-
-    if len(visible_points):
-        z_norm = np.clip((visible_points[:, 2] - z_min) / (z_max - z_min), 0.0, 1.0)
-        colors = cv2.applyColorMap((z_norm * 255).astype(np.uint8).reshape((-1, 1)), cv2.COLORMAP_TURBO)
-        canvas[rows, cols] = colors.reshape((-1, 3))
-
-    _draw_ego_vehicle(canvas, x_range, y_range, resolution)
-
-    header_h = 58
-    output = np.full((header_h + height, width, 3), 18, dtype=np.uint8)
-    output[header_h:, :] = canvas
-    title = f"{frame.scene_name} | sample {frame.sample_index} | ego-frame LiDAR BEV"
-    stats = f"raw points={len(lidar_points)} | visible={len(visible_points)} | res={resolution:.2f}m/cell"
-    cv2.putText(output, title, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (245, 245, 245), 1, cv2.LINE_AA)
-    cv2.putText(output, stats, (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (190, 220, 255), 1, cv2.LINE_AA)
-
-    if scale > 1:
-        output = cv2.resize(output, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-    return output

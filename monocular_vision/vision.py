@@ -1,15 +1,10 @@
-import os
-from dotenv import load_dotenv
 import cv2
 import numpy as np
 import time
 from monocular_vision.logging_utils import get_logger
-from collections import deque
-
-load_dotenv()
 
 class VisualOdometry:
-    def __init__(self, focal_length, principal_point, max_frames=100):
+    def __init__(self, focal_length, principal_point):
         self.logger = get_logger('VisualOdometry')
         
         # Camera intrinsic matrix K
@@ -21,14 +16,6 @@ class VisualOdometry:
         # Previous frame data
         self.prev_kp = None
         self.prev_desc = None
-        
-        # Frame management with a bounded queue
-        self.frames = deque(maxlen=max_frames)
-        
-        # Global pose tracking
-        self.current_pose_R = np.identity(3)
-        self.current_pose_t = np.zeros((3, 1))
-        self.trajectory = []
         
         # SIFT for feature detection and description
         self.sift = cv2.SIFT_create(
@@ -113,67 +100,8 @@ class VisualOdometry:
         return inlier_matches, R, t, True
     
     
-    def _update_pose(self, R, t):
-        # Update rotation: R_new = R_old @ R_relative
-        self.current_pose_R = self.current_pose_R @ R
-        # Update translation: t_new = t_old + R_old @ t_relative
-        self.current_pose_t = self.current_pose_t + self.current_pose_R @ t
-        
-        pose_data = {
-            'R': self.current_pose_R.copy(),
-            't': self.current_pose_t.copy(),
-            'timestamp': time.time()
-        }
-        self.trajectory.append(pose_data)
-        self.logger.debug(f"Global pose updated. Position: {self.current_pose_t.flatten()}")
-    
-    
-    def triangulate(self, R, t, kps, matches):
-        if len(matches) < 8:
-            self.logger.warning("Not enough matches for triangulation.")
-            return np.array([])
-        
-        P1 = self.K @ np.hstack([np.eye(3), np.zeros((3, 1))])
-        P2 = self.K @ np.hstack([R, t])
-        
-        pts1 = np.array([self.prev_kp[m.queryIdx].pt for m in matches], dtype=np.float32).T
-        pts2 = np.array([kps[m.trainIdx].pt for m in matches], dtype=np.float32).T
-        
-        homogeneous_coords = cv2.triangulatePoints(P1, P2, pts1, pts2)
-        
-        # Convert from homogeneous to Cartesian coordinates
-        w = homogeneous_coords[3]
-        valid_idx = np.abs(w) > 1e-6
-        if not np.any(valid_idx):
-            self.logger.warning("No valid triangulated points found.")
-            return np.array([])
-        
-        points_3d = homogeneous_coords[:3, valid_idx] / w[valid_idx]
-        points_3d = points_3d.T
-        
-        # Filter points based on a reasonable depth range
-        depth_valid = (points_3d[:, 2] > 0) & (points_3d[:, 2] < 100)
-        points_3d = points_3d[depth_valid]
-        
-        self.logger.debug(f"Triangulated {len(points_3d)} valid 3D points.")
-        return points_3d
-
-
-    def get_current_pose(self):
-        T = np.eye(4)
-        T[:3, :3] = self.current_pose_R
-        T[:3, 3:4] = self.current_pose_t
-        return T
-    
-    
-    def get_trajectory(self):
-        return self.trajectory
-
-
     def process_frame(self, frame):
         start_time = time.time()
-        self.frames.append(frame)
-        
         kps, descs = self._extract_features(frame)
         
         if self.prev_desc is None:
@@ -183,22 +111,13 @@ class VisualOdometry:
 
         matches = self._match_features(self.prev_desc, descs)
         inlier_matches, R, t, success = self._recover_pose(kps, matches)
-        
-        if success:
-            self._update_pose(R, t)
-            # Future work: Use triangulated points for map building
-            # points_3d = self.triangulate(R, t, kps, inlier_matches)
 
         annotated_frame = frame.copy()
-        if len(inlier_matches) > 0:
-            # Sort matches by distance for better visualization
-            inlier_matches = sorted(inlier_matches, key=lambda m: m.distance)
-            # Draw top 100 matches for clarity and performance
-            for match in inlier_matches:
-                pt1 = tuple(map(int, self.prev_kp[match.queryIdx].pt))
-                pt2 = tuple(map(int, kps[match.trainIdx].pt))
-                cv2.line(annotated_frame, pt1, pt2, (255, 0, 0), 1) 
-                cv2.circle(annotated_frame, pt2, 2, (0, 255, 0), -1)
+        for match in inlier_matches:
+            pt1 = tuple(map(int, self.prev_kp[match.queryIdx].pt))
+            pt2 = tuple(map(int, kps[match.trainIdx].pt))
+            cv2.line(annotated_frame, pt1, pt2, (255, 0, 0), 1)
+            cv2.circle(annotated_frame, pt2, 2, (0, 255, 0), -1)
 
         status_color = (0, 255, 0) if success else (0, 0, 255)
         status_text = f"Matches: {len(inlier_matches)}, Success: {success}"

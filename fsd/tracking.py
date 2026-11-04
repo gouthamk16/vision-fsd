@@ -11,6 +11,7 @@ object to its previous-frame self:
 
 Velocity is a finite difference of global position (true ground motion) rotated
 into the current ego frame; future positions are a constant-velocity extrapolation.
+Both trackers reset themselves when the frame's scene changes.
 """
 
 from __future__ import annotations
@@ -19,8 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from fsd.data import SurroundFrame
-from fsd.lidar_projection import quaternion_to_rotation_matrix, transform_points
+from fsd.data import Pose, SurroundFrame
 from fsd.object_detection import Box3D
 
 
@@ -33,125 +33,104 @@ class TrackedObject:
     future_xy_ego: np.ndarray  # (K, 2) constant-velocity predicted centers, current ego frame
 
 
-def _global_xy(box: Box3D, ego_pose: dict) -> np.ndarray:
-    """Object centre in the global frame (exact inverse of how center_ego was built)."""
-    return transform_points(
-        box.center_ego.reshape(1, 3), ego_pose["rotation"], ego_pose["translation"]
-    )[0, :2]
+def _global_xy(boxes: list[Box3D], ego_pose: Pose) -> np.ndarray:
+    if not boxes:
+        return np.empty((0, 2))
+    return ego_pose.apply(np.stack([box.center_ego for box in boxes]))[:, :2]
 
 
-def _make_tracked(
-    box: Box3D,
-    track_id: str,
-    global_xy: np.ndarray,
-    prev: tuple[np.ndarray, int] | None,
-    ts: int,
-    rot_ego: np.ndarray,
-    horizons_s: tuple[float, ...],
-    min_speed_mps: float,
-) -> TrackedObject:
-    v_ego = np.zeros(2)
-    speed = 0.0
-    if prev is not None:
-        prev_xy, prev_ts = prev
-        dt = (ts - prev_ts) / 1_000_000.0
-        if dt > 0.0:
-            v_ego = rot_ego.T @ ((global_xy - prev_xy) / dt)
-            speed = float(np.hypot(v_ego[0], v_ego[1]))
-    if speed >= min_speed_mps:
-        future = np.stack([box.center_ego[:2] + v_ego * h for h in horizons_s])
-    else:
+class _VelocityTracker:
+    def __init__(self, horizons_s: tuple[float, ...], min_speed_mps: float):
+        self.horizons_s = horizons_s
+        self.min_speed_mps = min_speed_mps
+        self._scene_token: str | None = None
+
+    def reset(self) -> None:
+        raise NotImplementedError
+
+    def _enter(self, frame: SurroundFrame) -> None:
+        if frame.scene_token != self._scene_token:
+            self.reset()
+            self._scene_token = frame.scene_token
+
+    def _track(self, box: Box3D, track_id: str, xy: np.ndarray, prev: tuple[np.ndarray, int] | None, frame: SurroundFrame) -> TrackedObject:
+        v_ego = np.zeros(2)
+        if prev is not None:
+            dt = (frame.timestamp_us - prev[1]) / 1_000_000.0
+            if dt > 0.0:
+                v_ego = frame.ego_pose.rotation[:2, :2].T @ ((xy - prev[0]) / dt)
+        speed = float(np.hypot(*v_ego))
         future = np.empty((0, 2))
-    return TrackedObject(box=box, track_id=track_id, velocity_ego=v_ego, speed_mps=speed, future_xy_ego=future)
+        if speed >= self.min_speed_mps:
+            future = np.stack([box.center_ego[:2] + v_ego * h for h in self.horizons_s])
+        return TrackedObject(box, track_id, v_ego, speed, future)
 
 
-class GtVelocityTracker:
+class GtVelocityTracker(_VelocityTracker):
     """Finite-difference velocity over stable instance tokens (the oracle)."""
 
     def __init__(self, horizons_s: tuple[float, ...] = (1.0, 2.0, 3.0), min_speed_mps: float = 0.5):
-        self.horizons_s = horizons_s
-        self.min_speed_mps = min_speed_mps
+        super().__init__(horizons_s, min_speed_mps)
         self._prev: dict[str, tuple[np.ndarray, int]] = {}
 
     def reset(self) -> None:
-        self._prev.clear()
+        self._prev = {}
 
     def update(self, frame: SurroundFrame, boxes: list[Box3D]) -> list[TrackedObject]:
-        ego_pose = frame.ego_pose
-        rot_ego = quaternion_to_rotation_matrix(ego_pose["rotation"])[:2, :2]
-        ts = frame.timestamp_us
-
-        tracked: list[TrackedObject] = []
-        current: dict[str, tuple[np.ndarray, int]] = {}
-        for box in boxes:
-            token = box.instance_token
-            global_xy = _global_xy(box, ego_pose)
-            if token:
-                current[token] = (global_xy, ts)
-            prev = self._prev.get(token) if token else None
-            tracked.append(
-                _make_tracked(box, token, global_xy, prev, ts, rot_ego, self.horizons_s, self.min_speed_mps)
-            )
-        self._prev = current
+        self._enter(frame)
+        xys = _global_xy(boxes, frame.ego_pose)
+        tracked = [
+            self._track(box, box.instance_token, xy, self._prev.get(box.instance_token) if box.instance_token else None, frame)
+            for box, xy in zip(boxes, xys)
+        ]
+        self._prev = {box.instance_token: (xy, frame.timestamp_us) for box, xy in zip(boxes, xys) if box.instance_token}
         return tracked
 
 
-class PredictionVelocityTracker:
+class PredictionVelocityTracker(_VelocityTracker):
     """Greedy nearest-by-class association for identity-free detector boxes."""
 
-    def __init__(
-        self,
-        horizons_s: tuple[float, ...] = (1.0, 2.0, 3.0),
-        min_speed_mps: float = 0.5,
-        gate_m: float = 5.0,
-    ):
-        self.horizons_s = horizons_s
-        self.min_speed_mps = min_speed_mps
+    def __init__(self, horizons_s: tuple[float, ...] = (1.0, 2.0, 3.0), min_speed_mps: float = 0.5, gate_m: float = 5.0):
+        super().__init__(horizons_s, min_speed_mps)
         self.gate_m = gate_m
-        self._tracks: dict[str, tuple[np.ndarray, int, str]] = {}  # id -> (global_xy, ts, class)
-        self._next_id = 0
+        self.reset()
 
     def reset(self) -> None:
-        self._tracks = {}
+        self._ids: list[str] = []
+        self._xy = np.empty((0, 2))
+        self._classes: list[str] = []
+        self._ts = 0
         self._next_id = 0
 
     def update(self, frame: SurroundFrame, boxes: list[Box3D]) -> list[TrackedObject]:
-        ego_pose = frame.ego_pose
-        rot_ego = quaternion_to_rotation_matrix(ego_pose["rotation"])[:2, :2]
-        ts = frame.timestamp_us
-        cur_xy = [_global_xy(box, ego_pose) for box in boxes]
+        self._enter(frame)
+        xys = _global_xy(boxes, frame.ego_pose)
+        match = self._associate(xys, [box.class_name for box in boxes])
 
-        # Candidate matches: same class within the gate, assigned greedily by distance.
-        candidates: list[tuple[float, int, str]] = []
-        for i, box in enumerate(boxes):
-            for tid, (gxy, _, cls) in self._tracks.items():
-                if cls != box.class_name:
-                    continue
-                dist = float(np.hypot(*(cur_xy[i] - gxy)))
-                if dist <= self.gate_m:
-                    candidates.append((dist, i, tid))
-        candidates.sort(key=lambda c: c[0])
-
-        box_to_tid: dict[int, str] = {}
-        used_tids: set[str] = set()
-        for dist, i, tid in candidates:
-            if i in box_to_tid or tid in used_tids:
-                continue
-            box_to_tid[i] = tid
-            used_tids.add(tid)
-
-        tracked: list[TrackedObject] = []
-        new_tracks: dict[str, tuple[np.ndarray, int, str]] = {}
-        for i, box in enumerate(boxes):
-            tid = box_to_tid.get(i)
-            prev = self._tracks.get(tid) if tid is not None else None
-            prev_state = (prev[0], prev[1]) if prev is not None else None
-            if tid is None:
-                tid = f"p{self._next_id}"
+        tracked, ids = [], []
+        for i, (box, xy) in enumerate(zip(boxes, xys)):
+            prev = match.get(i)
+            if prev is None:
+                track_id, prev_state = f"p{self._next_id}", None
                 self._next_id += 1
-            tracked.append(
-                _make_tracked(box, tid, cur_xy[i], prev_state, ts, rot_ego, self.horizons_s, self.min_speed_mps)
-            )
-            new_tracks[tid] = (cur_xy[i], ts, box.class_name)
-        self._tracks = new_tracks
+            else:
+                track_id, prev_state = self._ids[prev], (self._xy[prev], self._ts)
+            tracked.append(self._track(box, track_id, xy, prev_state, frame))
+            ids.append(track_id)
+        self._ids, self._xy, self._classes, self._ts = ids, xys, [b.class_name for b in boxes], frame.timestamp_us
         return tracked
+
+    def _associate(self, xys: np.ndarray, classes: list[str]) -> dict[int, int]:
+        """Map current box index -> previous track index, greedily by distance within the gate."""
+        if not len(xys) or not len(self._xy):
+            return {}
+        dist = np.linalg.norm(xys[:, None] - self._xy[None], axis=2)
+        dist[np.array(classes)[:, None] != np.array(self._classes)[None]] = np.inf
+        pairs = np.argwhere(dist <= self.gate_m)
+        match: dict[int, int] = {}
+        used: set[int] = set()
+        for i, j in pairs[np.argsort(dist[pairs[:, 0], pairs[:, 1]], kind="stable")]:
+            if i not in match and j not in used:
+                match[int(i)] = int(j)
+                used.add(int(j))
+        return match

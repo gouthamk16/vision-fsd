@@ -42,8 +42,6 @@ nuScenes is organised as ~850 independent 20-second driving clips (called scenes
 | `height_bev` | 2.5D BEV tensor - per-cell point density and min/max/mean/range height channels |
 | `objects_bev` | Camera+LiDAR frustum-fusion 3D detections on the LiDAR BEV |
 | `objects_cameras` | The same fusion detections drawn back onto the six camera images |
-| `planner_bev` | Offline LiDAR BEV planner: candidate trajectories, selected path, and collision context |
-| `planner_camera` | Front-camera overlay with selected path projected onto video and a compact BEV panel |
 | `world_bev` | Unified BEV world model: occupancy, height/collision context, ego state, object footprints, and per-object velocity arrows + predicted motion |
 | `all` | All views rendered simultaneously |
 
@@ -53,7 +51,7 @@ The six surround cameras alone are enough to estimate a top-down vehicle occupan
 
 ### Temporal occupancy - from per-frame perception to a world model
 
-Everything above is per-frame: process a sweep, draw it, move on. The occupancy view makes the system stateful. We keep a rolling log-odds grid in the ego frame, and each keyframe we warp the previous grid into the new ego frame using the nuScenes ego poses, decay it slightly, then fold in fresh LiDAR evidence - ground-height returns mark cells free, taller returns mark them occupied. The result is a continuously evolving map of free space and obstacles instead of a single-frame snapshot - the drivable corridor trailing behind the ego is evidence accumulated over the whole scene. This is the classical, debuggable groundwork for downstream trajectory planning. Implementation in [fsd/occupancy.py](fsd/occupancy.py).
+Everything above is per-frame: process a sweep, draw it, move on. The occupancy view makes the system stateful. We keep a rolling log-odds grid in the ego frame, and each keyframe we warp the previous grid into the new ego frame using the nuScenes ego poses, decay it slightly, then fold in fresh LiDAR evidence - cells holding above-ground returns are occupied, and every cell a laser ray crosses before its first obstacle is free. The result is a continuously evolving map of free space and obstacles instead of a single-frame snapshot - the drivable corridor trailing behind the ego is evidence accumulated over the whole scene. This is the classical, debuggable groundwork for downstream trajectory planning. Implementation in [fsd/occupancy.py](fsd/occupancy.py).
 
 ### 2.5D height channels - a richer BEV tensor
 
@@ -92,7 +90,7 @@ When we check the real way against the answer key on scene 0, the speeds agree t
   <tr>
     <td width="50%" align="center">
       <img src="results/nuscenes_bev.jpg" width="100%"><br>
-      <sub>Bird's-eye-view of a single LiDAR sweep</sub>
+      <sub>LiDAR BEV - 5 ego-motion-compensated sweeps over the HD map, coloured by height</sub>
     </td>
     <td width="50%" align="center">
       <img src="results/nuscenes_lss_bev.jpg" width="100%"><br>
@@ -102,11 +100,11 @@ When we check the real way against the answer key on scene 0, the speeds agree t
   <tr>
     <td width="50%" align="center">
       <img src="results/nuscenes_occupancy.jpg" width="100%"><br>
-      <sub>Temporal occupancy - log-odds fused across a scene (amber=occupied, navy=free, gray=unknown)</sub>
+      <sub>Temporal occupancy - log-odds fused across a scene, free space ray-cast (amber=occupied, navy=free, gray=unknown)</sub>
     </td>
     <td width="50%" align="center">
       <img src="results/nuscenes_world_bev.jpg" width="100%"><br>
-      <sub>Unified BEV world model - occupancy, collision context, ego state, object footprints, and per-object velocity (cyan arrows + m/s labels)</sub>
+      <sub>Unified BEV world model - occupancy, map lane lines, ego state, GT object footprints, and per-object velocity (arrows = 1 s, outlines = 3 s ahead)</sub>
     </td>
   </tr>
   <tr>
@@ -133,40 +131,26 @@ python -m fsd.visualize --scenes 0-9 --frames all --view cameras --save
 python -m fsd.visualize --view all --frames all --stream
 
 # Unified BEV world model
-python -m fsd.visualize --dataroot D:/nuscenes --view world_bev --frames 40 --save
+python -m fsd.visualize --view world_bev --frames 40 --save
+
+# Denser LiDAR: accumulate 10 ego-motion-compensated sweeps per keyframe
+python -m fsd.visualize --view bev --lidar-sweeps 10 --save
 
 # Smoother video using raw camera sweeps (~12 Hz instead of 2 Hz keyframes)
 python -m fsd.visualize --view cameras --sequence sweeps --frames all --save
 ```
 
-nuScenes data should live at `D:/nuscenes` or set `NUSCENES_ROOT` to point elsewhere.
+nuScenes data is read from `C:/nuscenes` (override with `--dataroot` or `NUSCENES_ROOT`). Extract the official archives straight into that root, which gives the flat devkit layout:
 
----
-
-## Motion Planning - WIP
-
-Motion planning is experimental for now. The planner uses LiDAR-derived occupancy, 2.5D height range, and ego-pose velocity to build timed local trajectory candidates in ego coordinates. `planner_bev` shows the candidate set and selected path from above. `planner_camera` projects the selected ground-plane path into the front camera and keeps a compact BEV panel below it for validation. This first planner is lane-optional and does not yet include lane topology, object prediction, route goals, or traffic rules. Implementation in [fsd/motion_planning/](fsd/motion_planning/).
-
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="results/nuscenes_planner_bev.jpg" width="100%"><br>
-      <sub>Offline planner BEV - valid candidates in gray and selected timed trajectory in green</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="results/nuscenes_planner_camera.jpg" width="100%"><br>
-      <sub>Planner camera view - selected trajectory projected into CAM_FRONT with planner BEV context underneath</sub>
-    </td>
-  </tr>
-</table>
-
-```bash
-# Offline planner BEV for 20 keyframes
-python -m fsd.visualize --dataroot D:/nuscenes --view planner_bev --frames 20 --save
-
-# Front-camera planner path projection with compact BEV context
-python -m fsd.visualize --dataroot D:/nuscenes --view planner_camera --frames 20 --save
+```text
+<dataroot>/
+  samples/          # keyframe images + LiDAR  (from v1.0-trainvalNN_blobs.tgz)
+  sweeps/           # intermediate sweeps      (from v1.0-trainvalNN_blobs.tgz)
+  maps/expansion/   # HD map JSON              (nuScenes-map-expansion-v1.3.zip)
+  v1.0-trainval/    # metadata tables          (v1.0-trainval_meta.tgz)
 ```
+
+The metadata covers all 850 scenes, but only scenes whose blobs are extracted are listed, so `--scenes 0` is the first scene you actually have. On first run the loader streams the large metadata tables once and caches a compact index in `~/.cache/vision-fsd/`; later runs start in seconds, and extracting another blob part rebuilds the index automatically.
 
 ---
 
@@ -257,7 +241,7 @@ pip install -r requirements.txt
 pytest tests/
 ```
 
-51 tests, mostly covering the planner and tracking. No GPU or dataset needed.
+Covers the data layer, BEV geometry, occupancy, tracking, detection geometry, the map renderer and view selection. No GPU or dataset needed.
 
 ## Models
 
@@ -270,5 +254,5 @@ pytest tests/
 
 ## Todo
 
-- Extended Kalman filters for trajectory mapping and path tracking — in progress on `feat/ctrv-ekf-tracking`
+- Extended Kalman filters for trajectory mapping and path tracking (design and plan in `docs/superpowers/`)
 - Lane detection (probably using a pretrained model, training a lane det model today is useless)

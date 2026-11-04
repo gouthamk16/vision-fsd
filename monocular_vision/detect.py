@@ -1,4 +1,3 @@
-from dotenv import load_dotenv
 import numpy as np
 import torch
 from ultralytics import YOLO
@@ -6,7 +5,6 @@ import cv2
 import time
 from monocular_vision.logging_utils import get_logger
 
-load_dotenv()
 
 # Typical depth extent (meters) per class — depth map only gives the front surface,
 # so we use priors to reconstruct the full box for BEV display.
@@ -58,9 +56,7 @@ class VehicleTracker:
         self.tracker_config = tracker_config
         self.max_track_misses = max_track_misses
         self.vehicle_classes = [1, 2, 3, 5, 7]
-        self.pure_vehicle_classes = self.vehicle_classes
-        self.classMap = {0: "Person", 1: "Bicycle", 2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck", 100: "NA"}
-        self.detected_objects = {}
+        self.classMap = {1: "Bicycle", 2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck"}
         self.track_memory = {}
         self.logger = get_logger('VehicleTracker')
         self.logger.info(
@@ -197,17 +193,13 @@ class VehicleTracker:
             self._overlay_drivable(frame, da_mask)
         current_objects = []
         current_track_ids = set()
-        self.detected_objects = {}
         self.logger.debug(f'Drawing bounding boxes. Inference time: {inference_time:.4f}s')
 
         for result in bounding_box_coords:
             for box in result.boxes:
                 cls = int(box.cls[-1])
                 conf = float(box.conf[-1])
-                class_name = self.classMap.get(cls, "Unknown")
-                self.detected_objects[class_name] = self.detected_objects.get(class_name, 0) + 1
-
-                if cls not in self.pure_vehicle_classes:
+                if cls not in self.vehicle_classes:
                     continue
 
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -265,10 +257,9 @@ class VehicleTracker:
         cv2.putText(frame, f"Time: {inference_time*1000:.1f}ms", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame, f"Objects: {len(current_objects)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        self.logger.debug(f"Objects detected: {self.detected_objects}")
         return frame
 
-    def detect_bb(self, frame, target_fps=10):
+    def detect_bb(self, frame):
         start_time = time.time()
         self.logger.debug('Tracking frame for object detection')
         try:
@@ -280,7 +271,7 @@ class VehicleTracker:
             inference_args = {
                 "conf": confidence_threshold,
                 "iou": self.iou_threshold,
-                "classes": self.pure_vehicle_classes,
+                "classes": self.vehicle_classes,
                 "imgsz": self.image_size,
                 "max_det": self.max_detections,
                 "device": self.device,

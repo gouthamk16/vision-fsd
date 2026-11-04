@@ -1,5 +1,6 @@
 # Local tooling
 .claude/
+lss_sample.py
 
 # Environments
 .venv/
