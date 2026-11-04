@@ -53,6 +53,16 @@ def test_collision_adds_gamma_only_at_that_step():
     assert gamma[0, 0].tolist() == [0.0, 0.0, 200.0, 0.0, 0.0, 0.0]
 
 
+def test_collision_counts_an_overlap_at_the_ego_front():
+    neg = _traj(0.0)
+    obstacles = torch.zeros(1, T, H, W, dtype=torch.bool)
+    front = neg[2, :2] + torch.tensor([2.9, 0.0])  # 1.5 m ahead of the body centre, still inside the 4.1 m body
+    r, c = _cells(torch.cat([front, torch.zeros(1)])[None])
+    obstacles[0, 2, r[0], c[0]] = True
+    gamma = violations(neg[None, None], obstacles, torch.ones(1, H, W, dtype=torch.bool), CFG)
+    assert gamma[0, 0].tolist() == [0.0, 0.0, 200.0, 0.0, 0.0, 0.0]
+
+
 def test_offroad_adds_gamma_everywhere_off_the_drivable_area():
     gamma = violations(_traj(0.0)[None, None], torch.zeros(1, T, H, W, dtype=torch.bool), torch.zeros(1, H, W, dtype=torch.bool), CFG)
     assert torch.all(gamma == 100.0)

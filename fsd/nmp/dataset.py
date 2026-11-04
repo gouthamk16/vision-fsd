@@ -14,9 +14,9 @@ from fsd.nmp.config import NmpConfig
 from fsd.nmp.samples import NmpSample, dense_input, load_sample
 from fsd.object_detection import Box3D
 
-# Obstacles grow by ~the ego half-width, so a trajectory point (the ego body
-# centre) inside them means the bodies overlap.
-_DILATE_CELLS = 5
+# Obstacles grow by a little more than the ego half-width (0.87 m), so the ego body can be tested as a few
+# points on its axis (losses.BODY_POINTS_M).
+OBSTACLE_DILATION_M = 1.0
 
 
 def footprint(box_xywly: np.ndarray) -> np.ndarray:
@@ -27,7 +27,8 @@ def footprint(box_xywly: np.ndarray) -> np.ndarray:
 
 def obstacle_masks(sample: NmpSample, cfg: NmpConfig) -> np.ndarray:
     """(T, H, W) bool: every box valid at future step k, dilated by the ego half-width."""
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * _DILATE_CELLS + 1,) * 2)
+    radius = round(OBSTACLE_DILATION_M / cfg.resolution)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1,) * 2)
     masks = np.zeros((cfg.horizon, *cfg.grid.shape), np.uint8)
     for step in range(1, cfg.horizon + 1):
         polygons = [fixed_point(cfg.grid, footprint(sample.boxes[row, step])) for row in np.flatnonzero(sample.box_valid[:, step])]

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torchvision.ops import sigmoid_focal_loss
@@ -9,12 +12,18 @@ from torchvision.ops import sigmoid_focal_loss
 from fsd.bev import BevGrid
 from fsd.ego_motion import EGO_FOOTPRINT
 from fsd.nmp.config import NmpConfig
+from fsd.nmp.dataset import OBSTACLE_DILATION_M
 from fsd.nmp.model import REG_PER_STEP, NmpOutput
 from fsd.nmp.samples import CLASS_NAMES
 
 STRIDE = 4
 OFFSET_SCALE_M = 4.0
-# Trajectories track the rear axle (the ego-frame origin); collisions are judged at the body centre.
+# Trajectories track the rear axle (the ego-frame origin). Discs of the obstacle dilation radius centred at
+# these points along the ego axis cover the whole footprint, so a hit at any of them means the bodies overlap
+# (conservative by up to ~0.5 m past the bumpers). Off-road is judged at the body centre.
+_REACH = math.sqrt(OBSTACLE_DILATION_M**2 - ((EGO_FOOTPRINT[1][1] - EGO_FOOTPRINT[1][0]) / 2) ** 2)
+_SPAN = (EGO_FOOTPRINT[0][0] + _REACH, EGO_FOOTPRINT[0][1] - _REACH)
+BODY_POINTS_M = np.linspace(*_SPAN, math.ceil((_SPAN[1] - _SPAN[0]) / (2 * _REACH)) + 1)
 BODY_CENTER_M = sum(EGO_FOOTPRINT[0]) / 2
 
 
@@ -82,10 +91,14 @@ def lookup_costs(cost: torch.Tensor, traj: torch.Tensor, grid: BevGrid) -> torch
 
 def violations(traj: torch.Tensor, obstacles: torch.Tensor, drivable: torch.Tensor, cfg: NmpConfig) -> torch.Tensor:
     """Rule-violation margin gamma (B, N, T): collision with a future GT box, or leaving the road."""
-    body = traj[..., :2] + BODY_CENTER_M * torch.stack([torch.cos(traj[..., 2]), torch.sin(traj[..., 2])], dim=-1)
-    cells = _flat_cells(body, cfg.grid)
-    collide = _gather_steps(obstacles.float(), cells)
-    on_road = drivable.float().flatten(1).gather(1, cells.flatten(1)).view(cells.shape)
+    heading = torch.stack([torch.cos(traj[..., 2]), torch.sin(traj[..., 2])], dim=-1)
+    offsets = torch.as_tensor(BODY_POINTS_M, dtype=traj.dtype, device=traj.device)
+    points = _flat_cells(traj[..., None, :2] + offsets[:, None] * heading[..., None, :], cfg.grid)  # (B, N, T, P)
+    b, n, t, p = points.shape
+    hits = _gather_steps(obstacles.float(), points.permute(0, 1, 3, 2).reshape(b, n * p, t)).view(b, n, p, t)
+    collide = hits.amax(dim=2)
+    centre = _flat_cells(traj[..., :2] + BODY_CENTER_M * heading, cfg.grid)
+    on_road = drivable.float().flatten(1).gather(1, centre.flatten(1)).view(centre.shape)
     return cfg.gamma_collision * collide + cfg.gamma_offroad * (1.0 - on_road)
 
 
