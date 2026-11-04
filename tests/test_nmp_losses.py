@@ -97,3 +97,12 @@ def test_target_encoding_round_trip():
 def test_targets_for_a_batch_without_any_boxes():
     cls, reg, mask = detection_targets(torch.zeros(2, 0, T + 1, 5), torch.zeros(2, 0, T + 1, dtype=torch.bool), torch.zeros(2, 0, dtype=torch.long), CFG)
     assert cls.shape == (2, 1, H // 4, W // 4) and reg.shape == (2, (T + 1) * 6, H // 4, W // 4) and not mask.any()
+
+
+def test_targets_mask_only_the_step_a_vehicle_is_missing():
+    boxes, valid, cls_idx = _boxes(True)
+    valid[0, 0, 3] = False  # occluded or out of the scene at step 3 only
+    cls, reg, mask = detection_targets(boxes, valid, cls_idx, CFG)
+    i, j = map(int, torch.nonzero(cls[0, 0])[0])
+    assert mask[0, :, i, j].tolist() == [True, True, True, False, True, True, True]
+    assert not reg[0, 18:24, i, j].any()
