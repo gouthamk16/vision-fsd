@@ -19,6 +19,8 @@ from fsd.nmp.trajectories import sample_trajectories
 from fsd.nuscenes_map import NuScenesMapRenderer
 from fsd.object_detection import Box3D
 
+SUPPRESS_RADIUS_M = 2.0  # under a car's 1.9 m width: two parked cars side by side stay two
+
 
 @dataclass(frozen=True)
 class PlanResult:
@@ -36,8 +38,22 @@ def select_plan(cost: torch.Tensor, candidates: torch.Tensor, grid: BevGrid) -> 
     return int(torch.argmin(costs)), costs
 
 
+def _suppress(xy: np.ndarray, scores: np.ndarray, radius: float) -> np.ndarray:
+    """Greedy NMS on centre distance: indices of kept detections, best first."""
+    keep, removed = [], np.zeros(len(scores), bool)
+    for i in np.argsort(-scores):
+        if not removed[i]:
+            keep.append(i)
+            removed |= np.hypot(*(xy - xy[i]).T) < radius
+    return np.array(keep, int)
+
+
 def decode_detections(out: NmpOutput, cfg: NmpConfig, threshold: float = 0.3) -> tuple[list[list[Box3D]], list[np.ndarray]]:
-    """Vehicle boxes at 3x3 score peaks above `threshold`, with their forecast poses per step."""
+    """Vehicle boxes at 3x3 score peaks above `threshold`, one per vehicle, with their forecast poses per step.
+
+    Every cell inside a box is a positive, so a vehicle's score is a plateau; in bf16 neighbouring cells tie
+    and each is a 3x3 peak. Peaks closer than SUPPRESS_RADIUS_M are merged into the best-scoring one.
+    """
     score = out.cls_logits.float().sigmoid()
     peaks = (score == F.max_pool2d(score, 3, stride=1, padding=1)) & (score > threshold)
     centers = cell_centers(cfg).to(score.device)
@@ -50,11 +66,13 @@ def decode_detections(out: NmpOutput, cfg: NmpConfig, threshold: float = 0.3) ->
         yaw = torch.atan2(reg[:, 4], reg[:, 5])                                                     # (T+1, K)
         size = reg[0, 2:4].exp()                                                                    # (2, K): w, l
         poses = torch.cat([xy, yaw[:, None]], dim=1).permute(2, 0, 1).cpu().numpy()                  # (K, T+1, 3)
+        scores, size = score[b, 0, rows, cols].cpu().numpy(), size.cpu().numpy()
+        keep = _suppress(poses[:, 0, :2], scores, SUPPRESS_RADIUS_M)
         boxes.append([
-            Box3D("car", np.array([p[0, 0], p[0, 1], 0.8]), np.array([float(size[0, k]), float(size[1, k]), 1.6]), float(p[0, 2]), float(score[b, 0, rows[k], cols[k]]))
-            for k, p in enumerate(poses)
+            Box3D("car", np.array([poses[k, 0, 0], poses[k, 0, 1], 0.8]), np.array([size[0, k], size[1, k], 1.6]), float(poses[k, 0, 2]), float(scores[k]))
+            for k in keep
         ])
-        forecasts.append(poses)
+        forecasts.append(poses[keep])
     return boxes, forecasts
 
 

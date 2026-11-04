@@ -99,3 +99,14 @@ def test_match_ignores_vehicles_beyond_eval_range():
     dets = [Box3D("car", np.array([x, 0.0, 0.8]), np.array([1.9, 4.6, 1.6]), 0.0, 0.9) for x in (10.0, 60.0)]
     scores, tps, _, n_gt = _match(dets, forecasts, gt, np.ones((2, T + 1), bool), np.array([car, car]), CFG)
     assert n_gt == 1 and scores == [0.9] and tps == [True]
+
+
+def test_decode_detections_merges_tied_cells_of_one_vehicle():
+    h, w = CFG.grid.shape[0] // 4, CFG.grid.shape[1] // 4
+    cls = torch.full((1, 1, h, w), -10.0)
+    cls[0, 0, 5, 2] = cls[0, 0, 5, 3] = 5.0  # one car: tied neighbours 0.8 m apart
+    cls[0, 0, 5, 10] = 4.0                  # another car 5.6 m away
+    reg = torch.zeros(1, (T + 1) * 6, h, w)
+    reg[0, 5::6] = 1.0
+    boxes, _ = decode_detections(NmpOutput(cls, reg, torch.zeros(1, T, *CFG.grid.shape)), CFG)
+    assert len(boxes[0]) == 2
