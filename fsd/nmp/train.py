@@ -77,8 +77,12 @@ def train_epoch(model, loader, optimizer, scheduler, cfg: NmpConfig, generator, 
 
 
 def fit(cfg: NmpConfig, cache_dir: Path, out_dir: Path, epochs: int = 20, batch_size: int = 4, lr: float = 2e-4,
-        workers: int = 4, limit: int | None = None, device: str | None = None, seed: int = 0) -> list[dict]:
-    """Train; save last.pt every epoch and best.pt by val collision at 3 s (then L2 at 3 s)."""
+        workers: int = 4, limit: int | None = None, device: str | None = None, seed: int = 0, resume: bool = False) -> list[dict]:
+    """Train; save last.pt every epoch and best.pt by val collision at 3 s (then L2 at 3 s).
+
+    last.pt also holds the optimiser, schedule and RNG state, so `resume` continues an interrupted run from its
+    last finished epoch exactly as if it had not stopped. Returns the history of the epochs run by this call.
+    """
     torch.manual_seed(seed)  # model init and shuffling: runs are reproducible
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     train = make_loader(cache_dir, "train", cfg, batch_size, workers, limit, shuffle=True)
@@ -88,20 +92,36 @@ def fit(cfg: NmpConfig, cache_dir: Path, out_dir: Path, epochs: int = 20, batch_
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(train))
     generator = torch.Generator(device=device).manual_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
-    history, best = [], None
-    for epoch in range(epochs):
-        start = time.time()
+    start, best = _restore(out_dir / "last.pt", model, optimizer, scheduler, generator) if resume and (out_dir / "last.pt").exists() else (0, None)
+    history = []
+    for epoch in range(start, epochs):
+        began = time.time()
         stats = train_epoch(model, train, optimizer, scheduler, cfg, generator)
         stats["val"] = evaluate(model, val, cfg)
         history.append(stats)
         key = (stats["val"]["collision_3s"], stats["val"]["l2_3s"])
-        torch.save({"model": model.state_dict(), "epoch": epoch, "val": stats["val"]}, out_dir / "last.pt")
         if best is None or key < best:
             best = key
             torch.save({"model": model.state_dict(), "epoch": epoch, "val": stats["val"]}, out_dir / "best.pt")
-        print(f"epoch {epoch + 1}/{epochs} ({time.time() - start:.0f}s) det {stats['det']:.3f} plan {stats['plan']:.1f} "
+        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                    "generator": generator.get_state(), "rng": torch.get_rng_state(), "epoch": epoch, "val": stats["val"],
+                    "best": best}, out_dir / "last.pt")
+        print(f"epoch {epoch + 1}/{epochs} ({time.time() - began:.0f}s) det {stats['det']:.3f} plan {stats['plan']:.1f} "
               f"| val L2@3s {stats['val']['l2_3s']:.2f} m coll@3s {stats['val']['collision_3s']:.2f}%")
     return history
+
+
+def _restore(path: Path, model, optimizer, scheduler, generator: torch.Generator) -> tuple[int, tuple[float, float] | None]:
+    """Load a last.pt written by fit(); returns (next epoch, best key so far)."""
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    if "optimizer" not in state:
+        raise ValueError(f"{path} has no optimiser state (written before fit could resume); start a fresh run instead")
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    scheduler.load_state_dict(state["scheduler"])
+    generator.set_state(state["generator"])
+    torch.set_rng_state(state["rng"])
+    return state["epoch"] + 1, tuple(state["best"]) if state["best"] is not None else None
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -117,6 +137,7 @@ def main(argv: list[str] | None = None) -> None:
     train.add_argument("--lr", type=float, default=2e-4)
     train.add_argument("--workers", type=int, default=4)
     train.add_argument("--limit", type=int, default=None, help="Use only the first N samples of each split.")
+    train.add_argument("--resume", action="store_true", help="Continue from --out/last.pt after an interruption.")
     ev = sub.add_parser("eval", help="Report planning and detection metrics against baselines.")
     ev.add_argument("--weights", type=Path, required=True)
     ev.add_argument("--split", choices=("train", "val"), default="val")
@@ -127,7 +148,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "cache":
         print(f"{build_cache(args.split, args.cache_dir, args.dataroot, cfg)} samples written to {args.cache_dir / args.split}")
     elif args.command == "fit":
-        fit(cfg, args.cache_dir, args.out, args.epochs, args.batch_size, args.lr, args.workers, args.limit)
+        fit(cfg, args.cache_dir, args.out, args.epochs, args.batch_size, args.lr, args.workers, args.limit, resume=args.resume)
     else:
         print(report(args.weights, args.cache_dir, args.split, cfg))
 

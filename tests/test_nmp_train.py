@@ -1,7 +1,10 @@
 from dataclasses import replace
 
 import numpy as np
+import pytest
+import torch
 
+from fsd.nmp import train
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.samples import NmpSample, save_sample
 from fsd.nmp.train import fit
@@ -29,3 +32,26 @@ def test_fit_overfits_four_samples(tmp_path):
     assert history[-1]["plan"] <= 0.1 * history[0]["plan"]
     assert history[-1]["val"]["l2_3s"] < 1.0
     assert (tmp_path / "out" / "last.pt").exists() and (tmp_path / "out" / "best.pt").exists()
+
+
+def test_resume_after_a_crash_matches_an_uninterrupted_run(tmp_path, monkeypatch):
+    _write_cache(tmp_path / "cache", np.random.default_rng(0))
+    args = dict(epochs=2, batch_size=2, lr=1e-3, workers=0, limit=4, device="cpu")
+    fit(SMALL, tmp_path / "cache", tmp_path / "full", **args)
+
+    real, calls = train.train_epoch, []
+    def crash_in_second_epoch(*a, **k):
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real(*a, **k)
+
+    monkeypatch.setattr(train, "train_epoch", crash_in_second_epoch)
+    with pytest.raises(KeyboardInterrupt):
+        fit(SMALL, tmp_path / "cache", tmp_path / "resumed", **args)
+    monkeypatch.undo()
+    history = fit(SMALL, tmp_path / "cache", tmp_path / "resumed", resume=True, **args)
+
+    assert len(history) == 1
+    full, resumed = (torch.load(tmp_path / d / "last.pt", weights_only=True)["model"] for d in ("full", "resumed"))
+    assert all(torch.equal(full[k], resumed[k]) for k in full)
