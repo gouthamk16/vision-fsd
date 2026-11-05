@@ -84,7 +84,7 @@ Trained 20 epochs on 139 nuScenes train scenes (4,396 samples), evaluated on the
 |---|---|---|---|
 | human driver (logged) | 0 / 0 / 0 | 0.00 / 0.00 / 0.00 | 0.00 |
 | constant velocity | 0.40 / 1.16 / 2.33 | 0.00 / 0.41 / 2.24 | 5.70 |
-| **NMP, last epoch** | 0.47 / 1.58 / 3.48 | 0.00 / 0.00 / 1.12 | 0.00 |
+| **NMP, last epoch** | 0.47 / 1.58 / 3.47 | 0.00 / 0.00 / 1.12 | 0.00 |
 | NMP, best epoch by val collision (17) | 0.46 / 1.56 / 3.42 | 0.00 / 0.00 / 0.81 | 0.00 |
 | NMP reference ([Khurana et al., ECCV 2022](https://arxiv.org/abs/2210.01917), full val, no map) | 0.53 / 1.25 / 2.67 | 0.04 / 0.12 / 0.87 | - |
 
