@@ -60,11 +60,13 @@ def ego_state(lidar: LidarFrame) -> tuple[float, float]:
     """(speed m/s, curvature 1/m): speed over the last ~0.1 s, curvature over the shortest recent span of 0.5 m."""
     if len(lidar.sweeps) < 2:
         return 0.0, 0.0
-    now, before = lidar.sweeps[0], lidar.sweeps[min(2, len(lidar.sweeps) - 1)]
+    span = min(2, len(lidar.sweeps) - 1)
+    now, before = lidar.sweeps[0], lidar.sweeps[span]
     dt = (now.timestamp_us - before.timestamp_us) * 1e-6
     speed = _travelled(now, before) / dt if dt > 0 else 0.0
-    # Below half a metre the heading change is dominated by pose noise, so slow turns reach further back.
-    for past in lidar.sweeps[1:]:
+    # Below half a metre the heading change is dominated by pose noise, so slow turns reach further back;
+    # never shorter than the ~0.1 s speed span, where one sweep's pose noise would dominate at speed.
+    for past in lidar.sweeps[span:]:
         dist = _travelled(now, past)
         if dist > 0.5:
             return speed, wrap_angle(now.ego_pose.yaw - past.ego_pose.yaw) / dist
@@ -97,7 +99,7 @@ def _future_boxes(
                 continue
             row = rows.setdefault(record["instance_token"], len(rows))
             box = box_from_global(record, frames[0].ego_pose, name)
-            entries.append((row, step, [*box.center_ego[:2], *box.size[:2], box.yaw_ego], CLASS_NAMES.index(name), record["num_lidar_pts"]))
+            entries.append((row, step, [*box.center_ego[:2], *box.size[:2], box.yaw_ego], CLASS_NAMES.index(name), box.num_lidar_pts))
     boxes = np.zeros((len(rows), len(frames), 5), np.float32)
     valid = np.zeros((len(rows), len(frames)), bool)
     classes = np.zeros(len(rows), np.int8)
@@ -167,6 +169,9 @@ def save_sample(sample: NmpSample, path: Path) -> None:
 
 def load_sample(path: Path) -> NmpSample:
     with np.load(path) as data:
+        missing = [f.name for f in fields(NmpSample) if f.name not in data.files]
+        if missing:
+            raise ValueError(f"{path} lacks {missing}: the cache predates them; rebuild it with `python -m fsd.nmp.train cache`")
         values = {f.name: data[f.name] for f in fields(NmpSample)}
     for name, cast in (("token", str), ("scene", str), ("v0", float), ("k0", float)):
         values[name] = cast(values[name])

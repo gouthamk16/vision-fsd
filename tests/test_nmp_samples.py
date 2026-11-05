@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from conftest import make_frame, yaw_pose
 from fsd.data import LidarFrame, LidarSweep
@@ -90,3 +91,27 @@ def test_scene_samples_skip_keyframes_without_full_history_or_future(tmp_path):
     # 12 keyframes leave 6 with a full 3 s future; of those, keyframes 0-3 lack history.
     assert [s.token for s in samples] == ["s4", "s5"]
     assert len(samples[0].voxels) > 0 and samples[0].ego_future.shape == (cfg.horizon, 3)
+
+
+def test_ego_state_fast_curvature_keeps_the_tenth_of_a_second_span():
+    # 15 m/s on a 50 m radius, the newest-but-one pose 0.01 rad off: one 0.05 s gap would double that noise.
+    def on_circle(s, noise=0.0):
+        return yaw_pose(50.0 * math.sin(s / 50.0), 50.0 * (1.0 - math.cos(s / 50.0)), s / 50.0 + noise)
+
+    poses = [(on_circle(5.0 - 0.75 * i, 0.01 if i == 1 else 0.0), 500_000 - 50_000 * i) for i in range(5)]
+    _, k0 = ego_state(_lidar(poses))
+    assert math.isclose(k0, 0.02, rel_tol=0.05)
+
+
+def test_box_point_count_defaults_to_zero_when_the_annotation_lacks_it():
+    frames = [make_frame(yaw_pose(), 500_000 * k) for k in range(7)]
+    record = _annotation("car", 10.0)
+    del record["num_lidar_pts"]
+    _, _, _, points = _future_boxes(frames, [[record]] + [[]] * 6, {"car": "vehicle.car"})
+    assert points.tolist() == [0]
+
+
+def test_loading_a_cache_from_before_a_field_existed_says_to_rebuild(tmp_path):
+    np.savez_compressed(tmp_path / "old.npz", token="t", scene="s")
+    with pytest.raises(ValueError, match="rebuild"):
+        load_sample(tmp_path / "old.npz")

@@ -214,7 +214,7 @@ def render_planner_bev(
         if logged is not None:
             ax.plot(*_path(logged).T, color=HUMAN, lw=1.6, ls=(0, (3, 2)), zorder=6)
         ax.set_title(f"{frame.scene_name}  ·  frame {frame.sample_index}", fontsize=10.5, loc="left")
-        ax.set_title("planner waiting for 1 s of LiDAR history", fontsize=9, loc="right", color="#555555")
+        ax.set_title("planner waiting for its full LiDAR history", fontsize=9, loc="right", color="#555555")
     else:
         _draw_agents(ax, result)
         _draw_paths(ax, result, logged)

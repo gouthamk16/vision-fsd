@@ -19,8 +19,10 @@ from fsd.nmp.samples import CLASS_NAMES
 STRIDE = 4
 OFFSET_SCALE_M = 4.0
 # Trajectories track the rear axle (the ego-frame origin). Discs of the obstacle dilation radius centred at
-# these points along the ego axis cover the whole footprint, so a hit at any of them means the bodies overlap
-# (conservative by up to ~0.5 m past the bumpers). Off-road is judged at the body centre.
+# these points along the ego axis cover the footprint in continuous space, so a hit at any of them means the
+# bodies overlap (conservative by up to ~0.5 m past the bumpers). On the 0.2 m grid the corners keep only
+# ~0.05 m of slack, so a clip of under one cell there can be missed; a larger dilation would close it at the
+# cost of penalising side passes that clear by ~0.3 m. Off-road is judged at the body centre.
 _REACH = math.sqrt(OBSTACLE_DILATION_M**2 - ((EGO_FOOTPRINT[1][1] - EGO_FOOTPRINT[1][0]) / 2) ** 2)
 _SPAN = (EGO_FOOTPRINT[0][0] + _REACH, EGO_FOOTPRINT[0][1] - _REACH)
 BODY_POINTS_M = np.linspace(*_SPAN, math.ceil((_SPAN[1] - _SPAN[0]) / (2 * _REACH)) + 1)
