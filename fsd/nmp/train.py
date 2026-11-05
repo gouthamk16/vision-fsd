@@ -80,22 +80,25 @@ def fit(cfg: NmpConfig, cache_dir: Path, out_dir: Path, epochs: int = 20, batch_
         workers: int = 4, limit: int | None = None, device: str | None = None, seed: int = 0, resume: bool = False) -> list[dict]:
     """Train; save last.pt every epoch and best.pt by val collision at 3 s (then L2 at 3 s).
 
-    last.pt also holds the optimiser, schedule and RNG state, so `resume` continues an interrupted run from its
+    last.pt also holds the optimiser, schedule and sampler state, so `resume` continues an interrupted run from its
     last finished epoch exactly as if it had not stopped. Returns the history of the epochs run by this call.
     """
-    torch.manual_seed(seed)  # model init and shuffling: runs are reproducible
+    torch.manual_seed(seed)  # model init
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    train = make_loader(cache_dir, "train", cfg, batch_size, workers, limit, shuffle=True)
+    order = torch.Generator()
+    train = make_loader(cache_dir, "train", cfg, batch_size, workers, limit, shuffle=True, order=order)
     val = make_loader(cache_dir, "val", cfg, batch_size, workers, limit, shuffle=False)
     model = NeuralMotionPlanner(cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(train))
     generator = torch.Generator(device=device).manual_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
-    start, best = _restore(out_dir / "last.pt", model, optimizer, scheduler, generator) if resume and (out_dir / "last.pt").exists() else (0, None)
+    run = {"epochs": epochs, "batch_size": batch_size, "lr": lr, "limit": limit, "seed": seed}
+    start, best = _restore(out_dir / "last.pt", run, model, optimizer, scheduler, generator) if resume else (0, None)
     history = []
     for epoch in range(start, epochs):
         began = time.time()
+        order.manual_seed(seed + epoch)  # the shuffle depends on (seed, epoch) only, however the run got here
         stats = train_epoch(model, train, optimizer, scheduler, cfg, generator)
         stats["val"] = evaluate(model, val, cfg)
         history.append(stats)
@@ -103,24 +106,33 @@ def fit(cfg: NmpConfig, cache_dir: Path, out_dir: Path, epochs: int = 20, batch_
         if best is None or key < best:
             best = key
             torch.save({"model": model.state_dict(), "epoch": epoch, "val": stats["val"]}, out_dir / "best.pt")
-        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
-                    "generator": generator.get_state(), "rng": torch.get_rng_state(), "epoch": epoch, "val": stats["val"],
-                    "best": best}, out_dir / "last.pt")
+        _save_last(out_dir / "last.pt", {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                                         "generator": generator.get_state(), "epoch": epoch, "val": stats["val"], "best": best, "run": run})
         print(f"epoch {epoch + 1}/{epochs} ({time.time() - began:.0f}s) det {stats['det']:.3f} plan {stats['plan']:.1f} "
               f"| val L2@3s {stats['val']['l2_3s']:.2f} m coll@3s {stats['val']['collision_3s']:.2f}%")
     return history
 
 
-def _restore(path: Path, model, optimizer, scheduler, generator: torch.Generator) -> tuple[int, tuple[float, float] | None]:
+def _save_last(path: Path, state: dict) -> None:
+    """Write then rename, so an interrupted save never destroys the checkpoint a resume needs."""
+    partial = path.with_suffix(".tmp")
+    torch.save(state, partial)
+    partial.replace(path)
+
+
+def _restore(path: Path, run: dict, model, optimizer, scheduler, generator: torch.Generator) -> tuple[int, tuple[float, float] | None]:
     """Load a last.pt written by fit(); returns (next epoch, best key so far)."""
+    if not path.exists():
+        raise FileNotFoundError(f"--resume needs {path}; train without --resume to start a run")
     state = torch.load(path, map_location="cpu", weights_only=True)
-    if "optimizer" not in state:
-        raise ValueError(f"{path} has no optimiser state (written before fit could resume); start a fresh run instead")
+    if "run" not in state:
+        raise ValueError(f"{path} was written before fit could resume; start a fresh run instead")
+    if state["run"] != run:
+        raise ValueError(f"--resume must repeat the original run's settings {state['run']}, got {run}")
     model.load_state_dict(state["model"])
     optimizer.load_state_dict(state["optimizer"])
     scheduler.load_state_dict(state["scheduler"])
     generator.set_state(state["generator"])
-    torch.set_rng_state(state["rng"])
     return state["epoch"] + 1, tuple(state["best"]) if state["best"] is not None else None
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, RandomSampler, Subset
 
 from fsd.bev import SHIFT, fixed_point
 from fsd.nmp.config import NmpConfig
@@ -75,8 +75,12 @@ def collate(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     return batch
 
 
-def make_loader(cache_dir: Path, split: str, cfg: NmpConfig, batch_size: int, workers: int, limit: int | None, shuffle: bool) -> DataLoader:
+def make_loader(
+    cache_dir: Path, split: str, cfg: NmpConfig, batch_size: int, workers: int, limit: int | None, shuffle: bool, order: torch.Generator | None = None
+) -> DataLoader:
+    """`order` alone drives the shuffle, so reseeding it before an epoch fixes that epoch's order (train.fit relies on it)."""
     dataset = NmpDataset(cache_dir, split, cfg)
     if limit is not None:
         dataset = Subset(dataset, range(min(limit, len(dataset))))
-    return DataLoader(dataset, batch_size, shuffle=shuffle, num_workers=workers, collate_fn=collate, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)
+    sampler = RandomSampler(dataset, generator=order) if shuffle else None
+    return DataLoader(dataset, batch_size, sampler=sampler, num_workers=workers, collate_fn=collate, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)

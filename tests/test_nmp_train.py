@@ -36,7 +36,8 @@ def test_fit_overfits_four_samples(tmp_path):
 
 def test_resume_after_a_crash_matches_an_uninterrupted_run(tmp_path, monkeypatch):
     _write_cache(tmp_path / "cache", np.random.default_rng(0))
-    args = dict(epochs=2, batch_size=2, lr=1e-3, workers=0, limit=4, device="cpu")
+    # A worker: persistent DataLoader workers draw RNG only when their iterator is first created.
+    args = dict(epochs=2, batch_size=2, lr=1e-3, workers=1, limit=4, device="cpu")
     fit(SMALL, tmp_path / "cache", tmp_path / "full", **args)
 
     real, calls = train.train_epoch, []
@@ -55,3 +56,13 @@ def test_resume_after_a_crash_matches_an_uninterrupted_run(tmp_path, monkeypatch
     assert len(history) == 1
     full, resumed = (torch.load(tmp_path / d / "last.pt", weights_only=True)["model"] for d in ("full", "resumed"))
     assert all(torch.equal(full[k], resumed[k]) for k in full)
+
+
+def test_resume_refuses_a_missing_checkpoint_or_a_changed_run(tmp_path):
+    _write_cache(tmp_path / "cache", np.random.default_rng(0))
+    args = dict(batch_size=2, lr=1e-3, workers=0, limit=4, device="cpu")
+    with pytest.raises(FileNotFoundError, match="last.pt"):
+        fit(SMALL, tmp_path / "cache", tmp_path / "out", epochs=1, resume=True, **args)
+    fit(SMALL, tmp_path / "cache", tmp_path / "out", epochs=1, **args)
+    with pytest.raises(ValueError, match="epochs"):
+        fit(SMALL, tmp_path / "cache", tmp_path / "out", epochs=3, resume=True, **args)
