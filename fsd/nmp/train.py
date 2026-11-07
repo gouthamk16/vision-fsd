@@ -11,6 +11,7 @@ not a visualization, so it does not belong in fsd.visualize.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import time
 from pathlib import Path
 
@@ -94,8 +95,9 @@ def fit(cfg: NmpConfig, cache_dir: Path, out_dir: Path, epochs: int = 20, batch_
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(train))
     generator = torch.Generator(device=device).manual_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
-    # The schedule length and the sampler RNG's type depend on the train set and device, so they must match too.
-    run = {"epochs": epochs, "batch_size": batch_size, "lr": lr, "limit": limit, "seed": seed, "device": device.type, "train_samples": len(train.dataset)}
+    # The schedule length and the sampler RNG's type depend on the train set and device, and the targets on the config, so all must match.
+    run = {"epochs": epochs, "batch_size": batch_size, "lr": lr, "limit": limit, "seed": seed, "device": device.type,
+           "train_samples": len(train.dataset), "cfg": dataclasses.asdict(cfg)}
     training = (model, optimizer, scheduler, generator)
     start, best = _restore(out_dir / "last.pt", run, *training) if resume else (0, None)
     history = []
@@ -117,13 +119,17 @@ def _checkpoint(out_dir: Path, epoch: int, val: dict, best: tuple | None, run: d
     key = (val["collision_3s"], val["l2_3s"])
     if best is None or key < best:
         best = key
-        torch.save({"model": model.state_dict(), "epoch": epoch, "val": val}, out_dir / "best.pt")
-    state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
-             "generator": generator.get_state(), "epoch": epoch, "val": val, "best": best, "run": run}
-    partial = out_dir / "last.tmp"  # write then rename, so an interrupted save never destroys what a resume needs
-    torch.save(state, partial)
-    partial.replace(out_dir / "last.pt")
+        _save(out_dir / "best.pt", {"model": model.state_dict(), "epoch": epoch, "val": val})
+    _save(out_dir / "last.pt", {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                                "generator": generator.get_state(), "epoch": epoch, "val": val, "best": best, "run": run})
     return best
+
+
+def _save(path: Path, state: dict) -> None:
+    """Write then rename, so an interrupted save never leaves a truncated checkpoint behind."""
+    partial = path.with_suffix(".tmp")
+    torch.save(state, partial)
+    partial.replace(path)
 
 
 def _restore(path: Path, run: dict, model, optimizer, scheduler, generator: torch.Generator) -> tuple[int, tuple[float, float] | None]:
