@@ -139,3 +139,22 @@ def test_planner_waits_for_the_full_lidar_history(tmp_path):
     planner = NmpPlanner(tmp_path / "w.pt", CFG, device="cpu")
     lidar = LidarFrame(tuple(LidarSweep(Path("x.bin"), -50_000 * i, yaw_pose(), yaw_pose()) for i in range(CFG.history_sweeps - 1)))
     assert planner.plan(make_frame(yaw_pose()), lidar, None) is None
+
+
+def test_planner_uses_only_the_history_it_was_trained_on(tmp_path, monkeypatch):
+    # Training caches hold exactly history_sweeps; a caller may load more (e.g. a longer --lidar-sweeps).
+    import fsd.nmp.planner as planner_module
+
+    seen = []
+    monkeypatch.setattr(planner_module, "sweep_points", lambda lidar, cfg: (seen.append(len(lidar.sweeps)), (np.zeros((0, 3)), np.zeros(0, np.int64)))[1])
+    monkeypatch.setattr(planner_module, "ego_state", lambda lidar: (seen.append(len(lidar.sweeps)), (0.0, 0.0))[1])
+
+    class EmptyMap:
+        def layer_masks(self, frame, grid, layers):
+            return np.zeros((len(layers), *grid.shape), np.uint8)
+
+    torch.save({"model": NeuralMotionPlanner(CFG).state_dict()}, tmp_path / "w.pt")
+    planner = NmpPlanner(tmp_path / "w.pt", CFG, device="cpu")
+    lidar = LidarFrame(tuple(LidarSweep(Path("x.bin"), -50_000 * i, yaw_pose(), yaw_pose()) for i in range(CFG.history_sweeps + 10)))
+    assert planner.plan(make_frame(yaw_pose()), lidar, EmptyMap()) is not None
+    assert seen == [CFG.history_sweeps, CFG.history_sweeps]
