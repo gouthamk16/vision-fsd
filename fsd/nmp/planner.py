@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,8 +52,8 @@ def _suppress(xy: np.ndarray, scores: np.ndarray, radius: float) -> np.ndarray:
 def decode_detections(out: NmpOutput, cfg: NmpConfig, threshold: float = 0.3) -> tuple[list[list[Box3D]], list[np.ndarray]]:
     """Vehicle boxes at 3x3 score peaks above `threshold`, one per vehicle, with their forecast poses per step.
 
-    Every cell inside a box is a positive, so a vehicle's score is a plateau; in bf16 neighbouring cells tie
-    and each is a 3x3 peak. Peaks closer than SUPPRESS_RADIUS_M are merged into the best-scoring one.
+    Training puts one Gaussian peak at each vehicle's centre, but in bf16 neighbouring cells can still tie and
+    each be a 3x3 peak, so peaks closer than SUPPRESS_RADIUS_M are merged into the best-scoring one.
     """
     score = out.cls_logits.float().sigmoid()
     peaks = (score == F.max_pool2d(score, 3, stride=1, padding=1)) & (score > threshold)
@@ -63,7 +64,10 @@ def decode_detections(out: NmpOutput, cfg: NmpConfig, threshold: float = 0.3) ->
         rows, cols = torch.nonzero(peaks[b, 0], as_tuple=True)
         reg = out.box_reg[b].float().view(steps, REG_PER_STEP, *score.shape[2:])[:, :, rows, cols]  # (T+1, 6, K)
         xy = centers[rows, cols].T[None] + OFFSET_SCALE_M * reg[:, :2]                              # (T+1, 2, K)
-        yaw = torch.atan2(reg[:, 4], reg[:, 5])                                                     # (T+1, K)
+        axis = 0.5 * torch.atan2(reg[:, 6], reg[:, 7])                                              # (T+1, K)
+        # The axis is reliable even for a parked car; the full angle only chooses which end is the front.
+        flip = torch.cos(torch.atan2(reg[:, 4], reg[:, 5]) - axis) < 0
+        yaw = torch.remainder(axis + math.pi * flip + math.pi, 2 * math.pi) - math.pi
         size = reg[0, 2:4].exp()                                                                    # (2, K): w, l
         poses = torch.cat([xy, yaw[:, None]], dim=1).permute(2, 0, 1).cpu().numpy()                  # (K, T+1, 3)
         scores, size = score[b, 0, rows, cols].cpu().numpy(), size.cpu().numpy()

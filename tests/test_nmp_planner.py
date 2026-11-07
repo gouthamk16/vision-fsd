@@ -10,7 +10,9 @@ from fsd.data import LidarFrame, LidarSweep
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.evaluate import _match
 from fsd.nmp.metrics import PlanMetrics, boxes_overlap, constant_velocity_plan, ego_footprint
-from fsd.nmp.model import NeuralMotionPlanner, NmpOutput
+from fsd.ego_motion import wrap_angle
+from fsd.nmp.losses import detection_targets
+from fsd.nmp.model import REG_PER_STEP, NeuralMotionPlanner, NmpOutput
 from fsd.nmp.planner import NmpPlanner, decode_detections, select_plan
 from fsd.nmp.samples import CLASS_NAMES
 from fsd.object_detection import Box3D
@@ -84,10 +86,11 @@ def test_decode_detections_recovers_a_peak():
     h, w = CFG.grid.shape[0] // 4, CFG.grid.shape[1] // 4
     cls = torch.full((1, 1, h, w), -10.0)
     cls[0, 0, 5, 6] = 5.0
-    reg = torch.zeros(1, (T + 1) * 6, h, w)
-    reg[0, 3::6] = math.log(4.6)
-    reg[0, 2::6] = math.log(1.9)
-    reg[0, 5::6] = 1.0  # cos(yaw) = 1
+    reg = torch.zeros(1, (T + 1) * REG_PER_STEP, h, w)
+    reg[0, 3::REG_PER_STEP] = math.log(4.6)
+    reg[0, 2::REG_PER_STEP] = math.log(1.9)
+    reg[0, 5::REG_PER_STEP] = 1.0  # cos(yaw) = 1
+    reg[0, 7::REG_PER_STEP] = 1.0  # cos(2 yaw) = 1
     boxes, forecasts = decode_detections(NmpOutput(cls, reg, torch.zeros(1, T, *CFG.grid.shape)), CFG)
     assert len(boxes[0]) == 1 and forecasts[0].shape == (1, T + 1, 3)
     assert math.isclose(float(boxes[0][0].size[1]), 4.6, rel_tol=1e-5)
@@ -109,8 +112,8 @@ def test_decode_detections_merges_tied_cells_of_one_vehicle():
     cls = torch.full((1, 1, h, w), -10.0)
     cls[0, 0, 5, 2] = cls[0, 0, 5, 3] = 5.0  # one car: tied neighbours 0.8 m apart
     cls[0, 0, 5, 10] = 4.0                  # another car 5.6 m away
-    reg = torch.zeros(1, (T + 1) * 6, h, w)
-    reg[0, 5::6] = 1.0
+    reg = torch.zeros(1, (T + 1) * REG_PER_STEP, h, w)
+    reg[0, 5::REG_PER_STEP] = reg[0, 7::REG_PER_STEP] = 1.0
     boxes, _ = decode_detections(NmpOutput(cls, reg, torch.zeros(1, T, *CFG.grid.shape)), CFG)
     assert len(boxes[0]) == 2
 
@@ -139,3 +142,39 @@ def test_planner_waits_for_the_full_lidar_history(tmp_path):
     planner = NmpPlanner(tmp_path / "w.pt", CFG, device="cpu")
     lidar = LidarFrame(tuple(LidarSweep(Path("x.bin"), -50_000 * i, yaw_pose(), yaw_pose()) for i in range(CFG.history_sweeps - 1)))
     assert planner.plan(make_frame(yaw_pose()), lidar, None) is None
+
+
+def _car_output(yaw: float) -> tuple[NmpOutput, torch.Tensor]:
+    """Model output equal to the training targets of one car at (2, 1) moving +1 m in x per step."""
+    boxes = torch.zeros(1, 1, T + 1, 5)
+    for k in range(T + 1):
+        boxes[0, 0, k] = torch.tensor([2.0 + k, 1.0, 1.9, 4.6, yaw])
+    car = torch.tensor([[CLASS_NAMES.index("car")]])
+    cls, reg, _ = detection_targets(boxes, torch.ones(1, 1, T + 1, dtype=torch.bool), car, torch.tensor([[9]]), CFG)
+    p = cls.clamp(1e-4, 1 - 1e-4)
+    return NmpOutput(torch.log(p) - torch.log1p(-p), reg, torch.zeros(1, T, *CFG.grid.shape)), boxes
+
+
+def test_one_gaussian_car_decodes_to_one_box_at_its_centre():
+    out, _ = _car_output(0.3)
+    boxes, forecasts = decode_detections(out, CFG)
+    assert len(boxes[0]) == 1
+    assert np.allclose(boxes[0][0].center_ego[:2], [2.0, 1.0], atol=1e-4)
+    assert np.allclose(forecasts[0][0, :, 0], 2.0 + np.arange(T + 1), atol=1e-4)
+
+
+def test_heading_round_trips_through_axis_and_side():
+    for deg in (30.0, 150.0, -100.0, 90.0):
+        out, _ = _car_output(math.radians(deg))
+        boxes, forecasts = decode_detections(out, CFG)
+        assert abs(math.degrees(float(wrap_angle(boxes[0][0].yaw_ego - math.radians(deg))))) < 1e-3
+        assert np.allclose(np.degrees(np.asarray(wrap_angle(forecasts[0][0, :, 2] - math.radians(deg)))), 0.0, atol=1e-3)
+
+
+def test_heading_without_a_side_still_lies_on_the_axis():
+    # A parked car's two directions look alike: the full-angle channels may average to nothing.
+    out, _ = _car_output(math.radians(150.0))
+    out.box_reg[0, 4::REG_PER_STEP] = out.box_reg[0, 5::REG_PER_STEP] = 0.0
+    boxes, _ = decode_detections(out, CFG)
+    off = abs(math.degrees(float(wrap_angle(boxes[0][0].yaw_ego - math.radians(150.0)))))
+    assert min(off, 180.0 - off) < 1e-3

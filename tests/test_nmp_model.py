@@ -12,7 +12,7 @@ def test_output_shapes_small_grid():
     assert SMALL.grid.shape == (80, 48)
     out = NeuralMotionPlanner(SMALL)(torch.zeros(2, SMALL.in_channels, 80, 48, dtype=torch.uint8))
     assert out.cls_logits.shape == (2, 1, 20, 12)
-    assert out.box_reg.shape == (2, 42, 20, 12)
+    assert out.box_reg.shape == (2, 56, 20, 12)  # 7 steps x (dx, dy, log w, log l, sin, cos, sin 2a, cos 2a)
     assert out.cost.shape == (2, 6, 80, 48)
 
 

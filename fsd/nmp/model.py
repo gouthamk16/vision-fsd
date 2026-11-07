@@ -11,7 +11,7 @@ from torch import nn
 
 from fsd.nmp.config import NmpConfig
 
-REG_PER_STEP = 6  # dx, dy, log w, log l, sin yaw, cos yaw
+REG_PER_STEP = 8  # dx, dy, log w, log l, sin yaw, cos yaw, sin 2 yaw, cos 2 yaw
 
 
 @dataclass

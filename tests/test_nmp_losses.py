@@ -3,10 +3,11 @@ from dataclasses import replace
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.losses import cell_centers, detection_loss, detection_targets, lookup_costs, planning_loss, violations
-from fsd.nmp.model import NmpOutput
+from fsd.nmp.model import REG_PER_STEP, NmpOutput
 from fsd.nmp.samples import CLASS_NAMES
 
 CFG = replace(NmpConfig(), x_range=(-8.0, 8.0), y_range=(-4.8, 4.8))  # 80 x 48 cells
@@ -93,7 +94,7 @@ def _boxes(valid_now: bool):
 def test_detection_loss_finite_without_vehicles():
     cls, reg, mask = detection_targets(*_boxes(False), CFG)
     assert cls.sum() == 0 and mask.sum() == 0
-    out = NmpOutput(torch.zeros(1, 1, H // 4, W // 4), torch.zeros(1, (T + 1) * 6, H // 4, W // 4), torch.zeros(1, T, H, W))
+    out = NmpOutput(torch.zeros(1, 1, H // 4, W // 4), torch.zeros(1, (T + 1) * REG_PER_STEP, H // 4, W // 4), torch.zeros(1, T, H, W))
     loss = detection_loss(out, (cls, reg, mask))
     assert torch.isfinite(loss) and float(loss) > 0
 
@@ -101,30 +102,65 @@ def test_detection_loss_finite_without_vehicles():
 def test_target_encoding_round_trip():
     cls, reg, mask = detection_targets(*_boxes(True), CFG)
     centers = cell_centers(CFG)
-    i, j = map(int, torch.nonzero(cls[0, 0])[0])
+    i, j = map(int, torch.nonzero(cls[0, 0] == 1.0)[0])
     for k in (0, 3):
-        dx, dy, logw, logl, s, c = reg[0, 6 * k : 6 * k + 6, i, j]
+        dx, dy, logw, logl, s, c, s2, c2 = reg[0, REG_PER_STEP * k : REG_PER_STEP * (k + 1), i, j]
         assert mask[0, k, i, j]
         assert np.allclose([centers[i, j, 0] + 4 * dx, centers[i, j, 1] + 4 * dy], [2.0 + k, 1.0], atol=1e-4)
         assert math.isclose(float(torch.atan2(s, c)), math.radians(30), abs_tol=1e-4)
+        assert math.isclose(float(torch.atan2(s2, c2)), math.radians(60), abs_tol=1e-4)
         assert math.isclose(float(torch.exp(logl)), 4.6, rel_tol=1e-5)
 
 
 def test_targets_for_a_batch_without_any_boxes():
     cls, reg, mask = detection_targets(torch.zeros(2, 0, T + 1, 5), torch.zeros(2, 0, T + 1, dtype=torch.bool), torch.zeros(2, 0, dtype=torch.long), torch.zeros(2, 0, dtype=torch.long), CFG)
-    assert cls.shape == (2, 1, H // 4, W // 4) and reg.shape == (2, (T + 1) * 6, H // 4, W // 4) and not mask.any()
+    assert cls.shape == (2, 1, H // 4, W // 4) and reg.shape == (2, (T + 1) * REG_PER_STEP, H // 4, W // 4) and not mask.any()
 
 
 def test_targets_mask_only_the_step_a_vehicle_is_missing():
     boxes, valid, cls_idx, points = _boxes(True)
     valid[0, 0, 3] = False  # occluded or out of the scene at step 3 only
     cls, reg, mask = detection_targets(boxes, valid, cls_idx, points, CFG)
-    i, j = map(int, torch.nonzero(cls[0, 0])[0])
+    i, j = map(int, torch.nonzero(cls[0, 0] == 1.0)[0])
     assert mask[0, :, i, j].tolist() == [True, True, True, False, True, True, True]
-    assert not reg[0, 18:24, i, j].any()
+    assert not reg[0, 3 * REG_PER_STEP : 4 * REG_PER_STEP, i, j].any()
 
 
 def test_targets_skip_a_vehicle_no_lidar_point_hit():
     boxes, valid, cls_idx, _ = _boxes(True)
     cls, reg, mask = detection_targets(boxes, valid, cls_idx, torch.tensor([[0]]), CFG)
     assert cls.sum() == 0 and not mask.any()
+
+
+def _centre_cell(x, y):
+    size = 4 * CFG.resolution
+    return int((CFG.x_range[1] - x) // size), int((CFG.y_range[1] - y) // size)
+
+
+def test_heatmap_peaks_once_at_the_box_centre_and_decays():
+    cls, _, _ = detection_targets(*_boxes(True), CFG)
+    heat = cls[0, 0]
+    i, j = _centre_cell(2.0, 1.0)
+    assert heat[i, j] == 1.0 and heat[i + 1, j] < 1.0 and heat[i + 2, j] < heat[i + 1, j]
+    peaks = (heat > 0) & (heat == F.max_pool2d(heat[None, None], 3, stride=1, padding=1)[0, 0])
+    assert int(peaks.sum()) == 1
+
+
+def test_heatmap_keeps_two_nearby_cars_apart():
+    boxes, valid, cls_idx, points = _boxes(True)
+    second = boxes.clone()
+    second[..., 1] -= 2.4  # a car in the next lane
+    cls, _, _ = detection_targets(torch.cat([boxes, second], 1), valid.repeat(1, 2, 1), cls_idx.repeat(1, 2), points.repeat(1, 2), CFG)
+    heat = cls[0, 0]
+    peaks = (heat > 0) & (heat == F.max_pool2d(heat[None, None], 3, stride=1, padding=1)[0, 0])
+    assert int((heat == 1.0).sum()) == 2 and int(peaks.sum()) == 2
+
+
+def test_focal_loss_prefers_the_target_heatmap():
+    targets = detection_targets(*_boxes(True), CFG)
+    cls, reg, _ = targets
+    p = cls.clamp(1e-4, 1 - 1e-4)
+    cost = torch.zeros(1, T, H, W)
+    matching = NmpOutput(torch.log(p) - torch.log1p(-p), reg, cost)
+    flat = NmpOutput(torch.full_like(cls, -2.0), reg, cost)
+    assert detection_loss(matching, targets) < detection_loss(flat, targets)
