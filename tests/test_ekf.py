@@ -69,3 +69,11 @@ def test_forecast_leaves_the_state_alone():
     before = ekf.x.copy()
     ekf.forecast((1.0, 3.0))
     assert np.array_equal(ekf.x, before)
+
+
+def test_prediction_couples_position_to_turn_rate_when_driving_straight():
+    # A new track starts at turn rate exactly 0; a lateral miss must still be able to correct the turn rate.
+    ekf = CtrvEkf(0.0, 0.0, 0.0)
+    ekf.x[2] = 10.0
+    ekf.predict(DT)
+    assert abs(ekf.P[1, 4]) > 1e-3

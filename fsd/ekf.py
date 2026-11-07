@@ -37,8 +37,10 @@ class CtrvEkf:
         self.noise = np.diag([accel_std**2, yaw_accel_std**2])
 
     def predict(self, dt: float) -> None:
-        # A numerical Jacobian of ctrv_step: exact enough, and it covers the straight-line branch for free.
-        eps = 1e-5
+        # A numerical Jacobian of ctrv_step. The step must reach past _STRAIGHT_RATE: inside it the straight-line
+        # branch has no turn rate in it, so a smaller step would lose the position / turn-rate coupling exactly
+        # when a track is new (rate 0). ctrv_step is smooth across the branch, so 1e-3 is still accurate.
+        eps = 1e-3
         jac = np.stack([(ctrv_step(self.x + e, dt) - ctrv_step(self.x - e, dt)) / (2 * eps) for e in np.eye(5) * eps], axis=1)
         c, s = math.cos(self.x[3]), math.sin(self.x[3])
         # Random longitudinal and yaw acceleration over the step (the standard CTRV process noise).
