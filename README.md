@@ -84,11 +84,11 @@ Trained 20 epochs on 139 nuScenes train scenes (4,396 samples), evaluated on the
 |---|---|---|---|
 | human driver (logged) | 0 / 0 / 0 | 0.00 / 0.00 / 0.00 | 0.00 |
 | constant velocity | 0.40 / 1.16 / 2.33 | 0.00 / 0.41 / 2.24 | 5.70 |
-| **NMP, last epoch** | 0.47 / 1.59 / 3.49 | 0.00 / 0.00 / 1.12 | 0.00 |
-| NMP, best epoch by val collision (17) | 0.47 / 1.57 / 3.44 | 0.00 / 0.00 / 0.61 | 0.10 |
+| **NMP, last epoch** | 0.49 / 1.65 / 3.60 | 0.00 / 0.10 / 1.02 | 0.00 |
+| NMP, best epoch by val collision (13) | 0.49 / 1.65 / 3.60 | 0.00 / 0.00 / 0.61 | 0.00 |
 | NMP reference ([Khurana et al., ECCV 2022](https://arxiv.org/abs/2210.01917), full val, no map) | 0.53 / 1.25 / 2.67 | 0.04 / 0.12 / 0.87 | - |
 
-The last epoch is the honest number; the best epoch was picked on the same val split, so its collision rate is optimistic. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), and it travels 18 m in 3 s against the human's 19 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m within 50 m is 0.44. Implementation in [fsd/nmp/](fsd/nmp/).
+The last epoch is the honest number; the best epoch was picked on the same val split, so its collision rate is optimistic. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), and it travels 17.5 m in 3 s against the human's 19.2 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m is 0.45, scored in the spirit of the nuScenes detection eval: vehicles within 50 m that at least one LiDAR return of the keyframe sweep hit (nuScenes also counts radar returns) and that lie inside the model's grid. Training leaves the unhit ones out of the targets, as mmdet3d's `filter_empty_gt` does for CenterPoint. Implementation in [fsd/nmp/](fsd/nmp/).
 
 ### Results
 
@@ -168,6 +168,7 @@ Neural motion planner - build the sample cache once, train, evaluate, then view:
 python -m fsd.nmp.train cache --split val      # ~2 min
 python -m fsd.nmp.train cache --split train    # ~9 min, ~1 GB in ~/.cache/vision-fsd/nmp
 python -m fsd.nmp.train fit                    # 20 epochs, ~3 h on an 8 GB laptop GPU
+python -m fsd.nmp.train fit --resume           # continue after an interruption
 python -m fsd.nmp.train eval --weights checkpoints/nmp/best.pt
 python -m fsd.visualize --view planner_bev --nmp-weights checkpoints/nmp/best.pt --scene-name scene-0003 --save
 

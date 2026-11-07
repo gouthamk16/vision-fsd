@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from fsd.data import LidarFrame, NuScenesSceneLoader, SurroundFrame
+from fsd.data import LidarFrame, LidarSweep, NuScenesSceneLoader, SurroundFrame
 from fsd.ego_motion import wrap_angle
 from fsd.lidar_projection import lidar_points_ego
 from fsd.nmp.config import NmpConfig
@@ -35,6 +35,7 @@ class NmpSample:
     boxes: np.ndarray       # float32 (K, T+1, 5): x, y, w, l, yaw; step 0 is now
     box_valid: np.ndarray   # bool (K, T+1)
     box_class: np.ndarray   # int8 (K,) index into CLASS_NAMES
+    box_points: np.ndarray  # int32 (K,) LiDAR returns in the step-0 box; 0 when unseen or absent
 
 
 def voxelize(points: np.ndarray, sweep: np.ndarray, cfg: NmpConfig) -> np.ndarray:
@@ -56,16 +57,24 @@ def dense_input(voxels: np.ndarray, map_masks: np.ndarray, cfg: NmpConfig) -> np
 
 
 def ego_state(lidar: LidarFrame) -> tuple[float, float]:
-    """(speed m/s, curvature 1/m) from the ego-pose change over the last ~0.1 s of sweeps."""
+    """(speed m/s, curvature 1/m): speed over the last ~0.1 s, curvature over the shortest recent span of 0.5 m."""
     if len(lidar.sweeps) < 2:
         return 0.0, 0.0
-    now, before = lidar.sweeps[0], lidar.sweeps[min(2, len(lidar.sweeps) - 1)]
+    span = min(2, len(lidar.sweeps) - 1)
+    now, before = lidar.sweeps[0], lidar.sweeps[span]
     dt = (now.timestamp_us - before.timestamp_us) * 1e-6
-    dist = float(np.hypot(*(now.ego_pose.translation - before.ego_pose.translation)[:2]))
-    speed = dist / dt if dt > 0 else 0.0
-    # Below half a metre the heading change is dominated by pose noise.
-    curvature = wrap_angle(now.ego_pose.yaw - before.ego_pose.yaw) / dist if dist > 0.5 else 0.0
-    return speed, curvature
+    speed = _travelled(now, before) / dt if dt > 0 else 0.0
+    # Below half a metre the heading change is dominated by pose noise, so slow turns reach further back;
+    # never shorter than the ~0.1 s speed span, where one sweep's pose noise would dominate at speed.
+    for past in lidar.sweeps[span:]:
+        dist = _travelled(now, past)
+        if dist > 0.5:
+            return speed, wrap_angle(now.ego_pose.yaw - past.ego_pose.yaw) / dist
+    return speed, 0.0
+
+
+def _travelled(now: LidarSweep, past: LidarSweep) -> float:
+    return float(np.hypot(*(now.ego_pose.translation - past.ego_pose.translation)[:2]))
 
 
 def sweep_points(lidar: LidarFrame, cfg: NmpConfig) -> tuple[np.ndarray, np.ndarray]:
@@ -79,8 +88,8 @@ def _future_boxes(
     frames: list[SurroundFrame],
     annotations: list[list[dict]],
     category_of_instance: dict[str, str],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(K, T+1, 5) boxes in frames[0]'s ego frame for every instance seen at any step."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """(K, T+1, 5) boxes in frames[0]'s ego frame for every instance seen at any step, with validity, class and step-0 LiDAR count."""
     rows: dict[str, int] = {}
     entries = []
     for step, records in enumerate(annotations):
@@ -90,13 +99,16 @@ def _future_boxes(
                 continue
             row = rows.setdefault(record["instance_token"], len(rows))
             box = box_from_global(record, frames[0].ego_pose, name)
-            entries.append((row, step, [*box.center_ego[:2], *box.size[:2], box.yaw_ego], CLASS_NAMES.index(name)))
+            entries.append((row, step, [*box.center_ego[:2], *box.size[:2], box.yaw_ego], CLASS_NAMES.index(name), box.num_lidar_pts))
     boxes = np.zeros((len(rows), len(frames), 5), np.float32)
     valid = np.zeros((len(rows), len(frames)), bool)
     classes = np.zeros(len(rows), np.int8)
-    for row, step, values, cls in entries:
+    points = np.zeros(len(rows), np.int32)
+    for row, step, values, cls, count in entries:
         boxes[row, step], valid[row, step], classes[row] = values, True, cls
-    return boxes, valid, classes
+        if step == 0:
+            points[row] = count
+    return boxes, valid, classes, points
 
 
 def build_scene_samples(
@@ -127,7 +139,7 @@ def _sample(
     frame = window[0]
     future = [f.ego_pose.relative_to(frame.ego_pose) for f in window[1:]]
     points, sweep = sweep_points(lidar, cfg)
-    boxes, valid, classes = _future_boxes(window, [loader.annotations(f.sample_token) for f in window], annotations.category_of_instance)
+    boxes, valid, classes, box_points = _future_boxes(window, [loader.annotations(f.sample_token) for f in window], annotations.category_of_instance)
     v0, k0 = ego_state(lidar)
     return NmpSample(
         token=frame.sample_token,
@@ -140,6 +152,7 @@ def _sample(
         boxes=boxes,
         box_valid=valid,
         box_class=classes,
+        box_points=box_points,
     )
 
 
@@ -156,6 +169,9 @@ def save_sample(sample: NmpSample, path: Path) -> None:
 
 def load_sample(path: Path) -> NmpSample:
     with np.load(path) as data:
+        missing = [f.name for f in fields(NmpSample) if f.name not in data.files]
+        if missing:
+            raise ValueError(f"{path} lacks {missing}: the cache predates them; rebuild it with `python -m fsd.nmp.train cache`")
         values = {f.name: data[f.name] for f in fields(NmpSample)}
     for name, cast in (("token", str), ("scene", str), ("v0", float), ("k0", float)):
         values[name] = cast(values[name])

@@ -86,7 +86,12 @@ class NmpPlanner:
         self.generator = torch.Generator(device=self.device).manual_seed(0)
 
     @torch.inference_mode()
-    def plan(self, frame: SurroundFrame, lidar: LidarFrame, map_renderer: NuScenesMapRenderer) -> PlanResult:
+    def plan(self, frame: SurroundFrame, lidar: LidarFrame, map_renderer: NuScenesMapRenderer) -> PlanResult | None:
+        """None until `lidar` holds the full history: training skips such keyframes rather than zero-padding."""
+        if len(lidar.sweeps) < self.cfg.history_sweeps:
+            return None
+        # Exactly the history a training sample holds: ego_state reaches back as far as the frame goes.
+        lidar = LidarFrame(lidar.sweeps[: self.cfg.history_sweeps])
         points, sweep = sweep_points(lidar, self.cfg)
         masks = map_renderer.layer_masks(frame, self.cfg.grid, self.cfg.map_layers)
         x = torch.from_numpy(dense_input(voxelize(points, sweep, self.cfg), masks, self.cfg))[None].to(self.device)

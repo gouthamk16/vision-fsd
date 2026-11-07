@@ -7,16 +7,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, RandomSampler, Subset
 
 from fsd.bev import SHIFT, fixed_point
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.samples import NmpSample, dense_input, load_sample
 from fsd.object_detection import Box3D
-
-# Obstacles grow by ~the ego half-width, so a trajectory point (the ego body
-# centre) inside them means the bodies overlap.
-_DILATE_CELLS = 5
 
 
 def footprint(box_xywly: np.ndarray) -> np.ndarray:
@@ -26,8 +22,9 @@ def footprint(box_xywly: np.ndarray) -> np.ndarray:
 
 
 def obstacle_masks(sample: NmpSample, cfg: NmpConfig) -> np.ndarray:
-    """(T, H, W) bool: every box valid at future step k, dilated by the ego half-width."""
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * _DILATE_CELLS + 1,) * 2)
+    """(T, H, W) bool: every box valid at future step k, dilated by cfg.obstacle_dilation."""
+    radius = round(cfg.obstacle_dilation / cfg.resolution)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1,) * 2)
     masks = np.zeros((cfg.horizon, *cfg.grid.shape), np.uint8)
     for step in range(1, cfg.horizon + 1):
         polygons = [fixed_point(cfg.grid, footprint(sample.boxes[row, step])) for row in np.flatnonzero(sample.box_valid[:, step])]
@@ -55,6 +52,7 @@ class NmpDataset(Dataset):
             "boxes": torch.from_numpy(sample.boxes),
             "box_valid": torch.from_numpy(sample.box_valid),
             "box_class": torch.from_numpy(sample.box_class.astype(np.int64)),
+            "box_points": torch.from_numpy(sample.box_points.astype(np.int64)),
             "obstacles": torch.from_numpy(obstacle_masks(sample, self.cfg)),
             "drivable": torch.from_numpy(sample.map_masks[0].astype(bool)),
         }
@@ -64,7 +62,7 @@ def collate(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     """Stack a batch, padding the per-sample box tables to the largest K (padding is invalid)."""
     k = max(item["boxes"].shape[0] for item in items)
     batch = {key: torch.stack([item[key] for item in items]) for key in items[0] if not key.startswith("box")}
-    for key in ("boxes", "box_valid", "box_class"):
+    for key in ("boxes", "box_valid", "box_class", "box_points"):
         padded = []
         for item in items:
             pad = k - item[key].shape[0]
@@ -73,8 +71,12 @@ def collate(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     return batch
 
 
-def make_loader(cache_dir: Path, split: str, cfg: NmpConfig, batch_size: int, workers: int, limit: int | None, shuffle: bool) -> DataLoader:
+def make_loader(
+    cache_dir: Path, split: str, cfg: NmpConfig, batch_size: int, workers: int, limit: int | None, shuffle: bool, order: torch.Generator | None = None
+) -> DataLoader:
+    """`order` alone drives the shuffle, so reseeding it before an epoch fixes that epoch's order (train.fit relies on it)."""
     dataset = NmpDataset(cache_dir, split, cfg)
     if limit is not None:
         dataset = Subset(dataset, range(min(limit, len(dataset))))
-    return DataLoader(dataset, batch_size, shuffle=shuffle, num_workers=workers, collate_fn=collate, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)
+    sampler = RandomSampler(dataset, generator=order) if shuffle else None
+    return DataLoader(dataset, batch_size, sampler=sampler, num_workers=workers, collate_fn=collate, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)

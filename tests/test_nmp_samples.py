@@ -1,12 +1,15 @@
 import math
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from conftest import make_frame, yaw_pose
 from fsd.data import LidarFrame, LidarSweep
 from fsd.nmp.config import NmpConfig
-from fsd.nmp.samples import CLASS_NAMES, NmpSample, _future_boxes, ego_state, load_sample, save_sample, voxelize
+from fsd.nmp.samples import CLASS_NAMES, NmpSample, _future_boxes, build_scene_samples, ego_state, load_sample, save_sample, voxelize
 
 CFG = NmpConfig()
 
@@ -30,6 +33,15 @@ def test_ego_state_turning():
     assert math.isclose(v0, 10.0, rel_tol=1e-6) and math.isclose(k0, 0.05, rel_tol=1e-6)
 
 
+def test_ego_state_slow_turn_reaches_back_for_curvature():
+    # 2 m/s on a 10 m radius: the last 0.1 s covers only 0.2 m, too short to read the heading change.
+    def on_circle(s):
+        return yaw_pose(10.0 * math.sin(s / 10.0), 10.0 * (1.0 - math.cos(s / 10.0)), s / 10.0)
+
+    _, k0 = ego_state(_lidar([(on_circle(1.0 - 0.1 * i), 500_000 - 50_000 * i) for i in range(10)]))
+    assert math.isclose(k0, 0.1, rel_tol=0.02)
+
+
 def _annotation(instance, x):
     return {"instance_token": instance, "translation": [x, 2.0, 0.5], "size": [1.9, 4.6, 1.5], "rotation": [1.0, 0.0, 0.0, 0.0], "num_lidar_pts": 5}
 
@@ -39,12 +51,14 @@ def test_box_missing_in_future_is_masked():
     annotations = [[_annotation("early", 10.0 + k)] if k <= 2 else [] for k in range(7)]
     annotations[4].append(_annotation("late", 30.0))
     categories = {"early": "vehicle.car", "late": "human.pedestrian.adult"}
-    boxes, valid, cls = _future_boxes(frames, annotations, categories)
+    boxes, valid, cls, points = _future_boxes(frames, annotations, categories)
     rows = {CLASS_NAMES[c]: i for i, c in enumerate(cls)}
     assert valid[rows["car"]].tolist() == [True, True, True, False, False, False, False]
     assert valid[rows["pedestrian"]].tolist() == [False] * 4 + [True, False, False]
     # Every step is expressed in the step-0 ego frame.
     assert np.allclose(boxes[rows["car"], 2, :2], [12.0, 2.0])
+    # LiDAR returns are counted at step 0 only; an instance absent then has none.
+    assert points[rows["car"]] == 5 and points[rows["pedestrian"]] == 0
 
 
 def test_save_load_round_trip(tmp_path):
@@ -53,9 +67,51 @@ def test_save_load_round_trip(tmp_path):
         voxels=np.array([3, 70], np.uint32), map_masks=np.eye(4, dtype=np.uint8)[None].repeat(8, 0),
         ego_future=np.ones((6, 3), np.float32), v0=4.5, k0=-0.01,
         boxes=np.zeros((2, 7, 5), np.float32), box_valid=np.ones((2, 7), bool), box_class=np.array([1, 3], np.int8),
+        box_points=np.array([12, 0], np.int32),
     )
     save_sample(sample, tmp_path / "s.npz")
     loaded = load_sample(tmp_path / "s.npz")
-    for field in ("voxels", "map_masks", "ego_future", "boxes", "box_valid", "box_class"):
+    for field in ("voxels", "map_masks", "ego_future", "boxes", "box_valid", "box_class", "box_points"):
         assert np.array_equal(getattr(loaded, field), getattr(sample, field)) and getattr(loaded, field).dtype == getattr(sample, field).dtype
     assert (loaded.token, loaded.scene, loaded.v0, loaded.k0) == ("tok", "scene-0001", 4.5, -0.01)
+
+
+def test_scene_samples_skip_keyframes_without_full_history_or_future(tmp_path):
+    cfg = replace(CFG, x_range=(-8.0, 8.0), y_range=(-4.8, 4.8))
+    scan = tmp_path / "scan.bin"
+    np.array([[5.0, 1.0, 0.5, 0.0, 0.0]], np.float32).tofile(scan)
+    frames = []
+    for i in range(12):  # history grows 5 sweeps per keyframe, so only keyframes 4+ have the 19 needed
+        t = 500_000 * i
+        sweeps = tuple(LidarSweep(scan, t - 50_000 * j, yaw_pose(), yaw_pose(0.1 * i)) for j in range(min(19, 5 * i + 1)))
+        frames.append((replace(make_frame(yaw_pose(0.1 * i), t), sample_token=f"s{i}", sample_index=i), LidarFrame(sweeps)))
+    loader = SimpleNamespace(iter_scene_frames=lambda **_: iter(frames), annotations=lambda token: [])
+    maps = SimpleNamespace(layer_masks=lambda frame, grid, layers: np.zeros((len(layers), *grid.shape), np.uint8))
+    samples = build_scene_samples(loader, maps, SimpleNamespace(category_of_instance={}), "scene-x", cfg)
+    # 12 keyframes leave 6 with a full 3 s future; of those, keyframes 0-3 lack history.
+    assert [s.token for s in samples] == ["s4", "s5"]
+    assert len(samples[0].voxels) > 0 and samples[0].ego_future.shape == (cfg.horizon, 3)
+
+
+def test_ego_state_fast_curvature_keeps_the_tenth_of_a_second_span():
+    # 15 m/s on a 50 m radius, the newest-but-one pose 0.01 rad off: one 0.05 s gap would double that noise.
+    def on_circle(s, noise=0.0):
+        return yaw_pose(50.0 * math.sin(s / 50.0), 50.0 * (1.0 - math.cos(s / 50.0)), s / 50.0 + noise)
+
+    poses = [(on_circle(5.0 - 0.75 * i, 0.01 if i == 1 else 0.0), 500_000 - 50_000 * i) for i in range(5)]
+    _, k0 = ego_state(_lidar(poses))
+    assert math.isclose(k0, 0.02, rel_tol=0.05)
+
+
+def test_box_point_count_defaults_to_zero_when_the_annotation_lacks_it():
+    frames = [make_frame(yaw_pose(), 500_000 * k) for k in range(7)]
+    record = _annotation("car", 10.0)
+    del record["num_lidar_pts"]
+    _, _, _, points = _future_boxes(frames, [[record]] + [[]] * 6, {"car": "vehicle.car"})
+    assert points.tolist() == [0]
+
+
+def test_loading_a_cache_from_before_a_field_existed_says_to_rebuild(tmp_path):
+    np.savez_compressed(tmp_path / "old.npz", token="t", scene="s")
+    with pytest.raises(ValueError, match="rebuild"):
+        load_sample(tmp_path / "old.npz")

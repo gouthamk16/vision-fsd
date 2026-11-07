@@ -127,6 +127,7 @@ render.py        planner_bev figure: scene + plan vs logged human, cost panels
 python -m fsd.nmp.train cache --split val      # ~2 min, ~1k samples
 python -m fsd.nmp.train cache --split train    # ~9 min, ~4.4k samples
 python -m fsd.nmp.train fit                    # 20 epochs, ~8.5 min each on an 8 GB GPU
+python -m fsd.nmp.train fit --resume           # continue an interrupted run from checkpoints/nmp/last.pt
 python -m fsd.nmp.train eval --weights checkpoints/nmp/best.pt
 python -m fsd.visualize --view planner_bev --nmp-weights checkpoints/nmp/best.pt --scene-name scene-0003 --save
 ```

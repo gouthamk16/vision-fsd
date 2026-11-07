@@ -50,7 +50,7 @@ class PlanMetrics:
         for k, pose in enumerate(plan):
             body = ego_footprint(pose)
             hits[k] = any(boxes_overlap(body, footprint(boxes[i, k + 1])) for i in np.flatnonzero(box_valid[:, k + 1]))
-            off[k] = not (inside[k] and drivable[rows[k], cols[k]])
+            off[k] = inside[k] and not drivable[rows[k], cols[k]]  # past the grid the map can't judge
         self.collided.append(np.logical_or.accumulate(hits))
         self.offroad.append(np.logical_or.accumulate(off))
 

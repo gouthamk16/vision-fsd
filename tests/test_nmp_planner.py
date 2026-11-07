@@ -1,14 +1,17 @@
 import math
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import torch
 
+from conftest import make_frame, yaw_pose
+from fsd.data import LidarFrame, LidarSweep
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.evaluate import _match
 from fsd.nmp.metrics import PlanMetrics, boxes_overlap, constant_velocity_plan, ego_footprint
-from fsd.nmp.model import NmpOutput
-from fsd.nmp.planner import decode_detections, select_plan
+from fsd.nmp.model import NeuralMotionPlanner, NmpOutput
+from fsd.nmp.planner import NmpPlanner, decode_detections, select_plan
 from fsd.nmp.samples import CLASS_NAMES
 from fsd.object_detection import Box3D
 
@@ -97,7 +100,7 @@ def test_match_ignores_vehicles_beyond_eval_range():
     forecasts = np.zeros((2, T + 1, 3), np.float32)
     forecasts[0, :, 0], forecasts[1, :, 0] = 10.0, 60.0
     dets = [Box3D("car", np.array([x, 0.0, 0.8]), np.array([1.9, 4.6, 1.6]), 0.0, 0.9) for x in (10.0, 60.0)]
-    scores, tps, _, n_gt = _match(dets, forecasts, gt, np.ones((2, T + 1), bool), np.array([car, car]), CFG)
+    scores, tps, _, n_gt = _match(dets, forecasts, gt, np.ones((2, T + 1), bool), np.array([car, car]), np.array([9, 9]), NmpConfig())
     assert n_gt == 1 and scores == [0.9] and tps == [True]
 
 
@@ -110,3 +113,48 @@ def test_decode_detections_merges_tied_cells_of_one_vehicle():
     reg[0, 5::6] = 1.0
     boxes, _ = decode_detections(NmpOutput(cls, reg, torch.zeros(1, T, *CFG.grid.shape)), CFG)
     assert len(boxes[0]) == 2
+
+
+def test_match_ignores_vehicles_without_lidar_points_or_outside_the_grid():
+    car = CLASS_NAMES.index(CFG.det_classes[0])
+    gt = np.zeros((3, T + 1, 5), np.float32)
+    gt[:, :, 0] = 3.0
+    gt[2, :, 1] = 4.0  # CFG's grid spans y = ±4.8 m; this one sits inside
+    gt[1, :, 1] = 6.0  # and this one outside it
+    scores, tps, _, n_gt = _match([], np.zeros((0, T + 1, 3)), gt, np.ones((3, T + 1), bool), np.full(3, car), np.array([0, 9, 9]), CFG)
+    assert n_gt == 1
+
+
+def test_plan_beyond_the_grid_is_not_counted_off_road():
+    plan = np.zeros((T, 3), np.float32)
+    plan[:, 0] = np.linspace(2.0, 12.0, T)  # CFG's grid ends at x = 8 m: the map can't judge the last steps
+    metrics = PlanMetrics()
+    metrics.add(plan, plan, np.zeros((0, T + 1, 5), np.float32), np.zeros((0, T + 1), bool), np.ones(CFG.grid.shape, bool), CFG)
+    assert metrics.summary()["offroad_3s"] == 0.0
+
+
+def test_planner_waits_for_the_full_lidar_history(tmp_path):
+    # Training never saw a partial history (those keyframes are skipped), so inference doesn't plan on one.
+    torch.save({"model": NeuralMotionPlanner(CFG).state_dict()}, tmp_path / "w.pt")
+    planner = NmpPlanner(tmp_path / "w.pt", CFG, device="cpu")
+    lidar = LidarFrame(tuple(LidarSweep(Path("x.bin"), -50_000 * i, yaw_pose(), yaw_pose()) for i in range(CFG.history_sweeps - 1)))
+    assert planner.plan(make_frame(yaw_pose()), lidar, None) is None
+
+
+def test_planner_uses_only_the_history_it_was_trained_on(tmp_path, monkeypatch):
+    # Training caches hold exactly history_sweeps; a caller may load more (e.g. a longer --lidar-sweeps).
+    import fsd.nmp.planner as planner_module
+
+    seen = []
+    monkeypatch.setattr(planner_module, "sweep_points", lambda lidar, cfg: (seen.append(len(lidar.sweeps)), (np.zeros((0, 3)), np.zeros(0, np.int64)))[1])
+    monkeypatch.setattr(planner_module, "ego_state", lambda lidar: (seen.append(len(lidar.sweeps)), (0.0, 0.0))[1])
+
+    class EmptyMap:
+        def layer_masks(self, frame, grid, layers):
+            return np.zeros((len(layers), *grid.shape), np.uint8)
+
+    torch.save({"model": NeuralMotionPlanner(CFG).state_dict()}, tmp_path / "w.pt")
+    planner = NmpPlanner(tmp_path / "w.pt", CFG, device="cpu")
+    lidar = LidarFrame(tuple(LidarSweep(Path("x.bin"), -50_000 * i, yaw_pose(), yaw_pose()) for i in range(CFG.history_sweeps + 10)))
+    assert planner.plan(make_frame(yaw_pose()), lidar, EmptyMap()) is not None
+    assert seen == [CFG.history_sweeps, CFG.history_sweeps]

@@ -11,6 +11,7 @@ not a visualization, so it does not belong in fsd.visualize.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import time
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def train_step(model: NeuralMotionPlanner, batch: dict, cfg: NmpConfig, generato
     device = batch["input"].device
     with torch.autocast(device.type, torch.bfloat16, enabled=device.type == "cuda"):
         out = model(batch["input"])
-    det = detection_loss(out, detection_targets(batch["boxes"], batch["box_valid"], batch["box_class"], cfg))
+    det = detection_loss(out, detection_targets(batch["boxes"], batch["box_valid"], batch["box_class"], batch["box_points"], cfg))
     negatives = sample_trajectories(batch["v0"], batch["k0"], cfg, cfg.n_trajectories, 1.0 - cfg.negative_free_init_p, generator)
     gamma = violations(negatives, batch["obstacles"], batch["drivable"], cfg)
     return det, planning_loss(out.cost.float(), batch["ego_future"], negatives, gamma, cfg.grid)
@@ -77,31 +78,74 @@ def train_epoch(model, loader, optimizer, scheduler, cfg: NmpConfig, generator, 
 
 
 def fit(cfg: NmpConfig, cache_dir: Path, out_dir: Path, epochs: int = 20, batch_size: int = 4, lr: float = 2e-4,
-        workers: int = 4, limit: int | None = None, device: str | None = None, seed: int = 0) -> list[dict]:
-    """Train; save last.pt every epoch and best.pt by val collision at 3 s (then L2 at 3 s)."""
-    torch.manual_seed(seed)  # model init and shuffling: runs are reproducible
+        workers: int = 4, limit: int | None = None, device: str | None = None, seed: int = 0, resume: bool = False) -> list[dict]:
+    """Train; save last.pt every epoch and best.pt by val collision at 3 s (then L2 at 3 s).
+
+    `resume` continues an interrupted run from last.pt with the same data order and RNG state. On CPU that
+    reproduces an uninterrupted run exactly; on GPU, non-deterministic kernels make any two runs drift apart.
+    Returns the history of the epochs run by this call.
+    """
+    torch.manual_seed(seed)  # model init
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    train = make_loader(cache_dir, "train", cfg, batch_size, workers, limit, shuffle=True)
+    order = torch.Generator()
+    train = make_loader(cache_dir, "train", cfg, batch_size, workers, limit, shuffle=True, order=order)
     val = make_loader(cache_dir, "val", cfg, batch_size, workers, limit, shuffle=False)
     model = NeuralMotionPlanner(cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs * len(train))
     generator = torch.Generator(device=device).manual_seed(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
-    history, best = [], None
-    for epoch in range(epochs):
-        start = time.time()
+    # The schedule length and the sampler RNG's type depend on the train set and device, and the targets on the config, so all must match.
+    run = {"epochs": epochs, "batch_size": batch_size, "lr": lr, "limit": limit, "seed": seed, "device": device.type,
+           "train_samples": len(train.dataset), "cfg": dataclasses.asdict(cfg)}
+    training = (model, optimizer, scheduler, generator)
+    start, best = _restore(out_dir / "last.pt", run, *training) if resume else (0, None)
+    history = []
+    for epoch in range(start, epochs):
+        began = time.time()
+        order.manual_seed(seed + epoch)  # the shuffle depends on (seed, epoch) only, however the run got here
         stats = train_epoch(model, train, optimizer, scheduler, cfg, generator)
         stats["val"] = evaluate(model, val, cfg)
         history.append(stats)
-        key = (stats["val"]["collision_3s"], stats["val"]["l2_3s"])
-        torch.save({"model": model.state_dict(), "epoch": epoch, "val": stats["val"]}, out_dir / "last.pt")
-        if best is None or key < best:
-            best = key
-            torch.save({"model": model.state_dict(), "epoch": epoch, "val": stats["val"]}, out_dir / "best.pt")
-        print(f"epoch {epoch + 1}/{epochs} ({time.time() - start:.0f}s) det {stats['det']:.3f} plan {stats['plan']:.1f} "
+        best = _checkpoint(out_dir, epoch, stats["val"], best, run, training)
+        print(f"epoch {epoch + 1}/{epochs} ({time.time() - began:.0f}s) det {stats['det']:.3f} plan {stats['plan']:.1f} "
               f"| val L2@3s {stats['val']['l2_3s']:.2f} m coll@3s {stats['val']['collision_3s']:.2f}%")
     return history
+
+
+def _checkpoint(out_dir: Path, epoch: int, val: dict, best: tuple | None, run: dict, training: tuple) -> tuple[float, float]:
+    """best.pt when val beats `best` (collision at 3 s, then L2 at 3 s), last.pt always; returns the best key."""
+    model, optimizer, scheduler, generator = training
+    key = (val["collision_3s"], val["l2_3s"])
+    if best is None or key < best:
+        best = key
+        _save(out_dir / "best.pt", {"model": model.state_dict(), "epoch": epoch, "val": val})
+    _save(out_dir / "last.pt", {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                                "generator": generator.get_state(), "epoch": epoch, "val": val, "best": best, "run": run})
+    return best
+
+
+def _save(path: Path, state: dict) -> None:
+    """Write then rename, so an interrupted save never leaves a truncated checkpoint behind."""
+    partial = path.with_suffix(".tmp")
+    torch.save(state, partial)
+    partial.replace(path)
+
+
+def _restore(path: Path, run: dict, model, optimizer, scheduler, generator: torch.Generator) -> tuple[int, tuple[float, float] | None]:
+    """Load a last.pt written by fit(); returns (next epoch, best key so far)."""
+    if not path.exists():
+        raise FileNotFoundError(f"--resume needs {path}; train without --resume to start a run")
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    if "run" not in state:
+        raise ValueError(f"{path} was written before fit could resume; start a fresh run instead")
+    if state["run"] != run:
+        raise ValueError(f"--resume must repeat the original run's settings {state['run']}, got {run}")
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    scheduler.load_state_dict(state["scheduler"])
+    generator.set_state(state["generator"])
+    return state["epoch"] + 1, tuple(state["best"]) if state["best"] is not None else None
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -117,6 +161,7 @@ def main(argv: list[str] | None = None) -> None:
     train.add_argument("--lr", type=float, default=2e-4)
     train.add_argument("--workers", type=int, default=4)
     train.add_argument("--limit", type=int, default=None, help="Use only the first N samples of each split.")
+    train.add_argument("--resume", action="store_true", help="Continue from --out/last.pt after an interruption.")
     ev = sub.add_parser("eval", help="Report planning and detection metrics against baselines.")
     ev.add_argument("--weights", type=Path, required=True)
     ev.add_argument("--split", choices=("train", "val"), default="val")
@@ -127,7 +172,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "cache":
         print(f"{build_cache(args.split, args.cache_dir, args.dataroot, cfg)} samples written to {args.cache_dir / args.split}")
     elif args.command == "fit":
-        fit(cfg, args.cache_dir, args.out, args.epochs, args.batch_size, args.lr, args.workers, args.limit)
+        fit(cfg, args.cache_dir, args.out, args.epochs, args.batch_size, args.lr, args.workers, args.limit, resume=args.resume)
     else:
         print(report(args.weights, args.cache_dir, args.split, cfg))
 

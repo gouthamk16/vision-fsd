@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torchvision.ops import sigmoid_focal_loss
@@ -14,8 +17,21 @@ from fsd.nmp.samples import CLASS_NAMES
 
 STRIDE = 4
 OFFSET_SCALE_M = 4.0
-# Trajectories track the rear axle (the ego-frame origin); collisions are judged at the body centre.
+# Trajectories track the rear axle (the ego-frame origin). Off-road is judged at the body centre.
 BODY_CENTER_M = sum(EGO_FOOTPRINT[0]) / 2
+
+
+def body_points(cfg: NmpConfig) -> np.ndarray:
+    """Offsets along the ego axis whose discs of the obstacle dilation radius cover the footprint.
+
+    A hit at any of them means the bodies overlap (conservative by up to ~0.5 m past the bumpers). On the grid the
+    corners keep only ~0.05 m of slack at 1.0 m, so a clip of under one cell there can be missed; a larger dilation
+    would close it at the cost of penalising side passes that clear by ~0.3 m.
+    """
+    (x0, x1), (_, half_width) = EGO_FOOTPRINT
+    reach = math.sqrt(cfg.obstacle_dilation**2 - half_width**2)
+    span = (x0 + reach, x1 - reach)
+    return np.linspace(*span, math.ceil((span[1] - span[0]) / (2 * reach)) + 1)
 
 
 def cell_centers(cfg: NmpConfig) -> torch.Tensor:
@@ -26,8 +42,11 @@ def cell_centers(cfg: NmpConfig) -> torch.Tensor:
     return torch.stack([cfg.x_range[1] - (rows + 0.5) * size, cfg.y_range[1] - (cols + 0.5) * size], dim=-1)
 
 
-def detection_targets(boxes: torch.Tensor, box_valid: torch.Tensor, box_class: torch.Tensor, cfg: NmpConfig):
-    """Per-cell (cls, reg, reg_mask): a cell is positive when its centre lies in a step-0 vehicle box."""
+def detection_targets(boxes: torch.Tensor, box_valid: torch.Tensor, box_class: torch.Tensor, box_points: torch.Tensor, cfg: NmpConfig):
+    """Per-cell (cls, reg, reg_mask): a cell is positive when its centre lies in a step-0 vehicle box.
+
+    Vehicles no LiDAR return hit are left out, as the eval leaves them out: the input holds no evidence of them.
+    """
     centers = cell_centers(cfg).to(boxes.device)                                   # (h, w, 2)
     if boxes.shape[1] == 0:
         h, w = centers.shape[:2]
@@ -35,7 +54,7 @@ def detection_targets(boxes: torch.Tensor, box_valid: torch.Tensor, box_class: t
         zeros = boxes.new_zeros
         return zeros((boxes.shape[0], 1, h, w)), zeros((boxes.shape[0], steps * REG_PER_STEP, h, w)), zeros((boxes.shape[0], steps, h, w), dtype=torch.bool)
     detect = torch.tensor([CLASS_NAMES.index(c) for c in cfg.det_classes], device=boxes.device)
-    owner = box_valid[..., 0] & torch.isin(box_class, detect)                       # (B, K)
+    owner = box_valid[..., 0] & torch.isin(box_class, detect) & (box_points > 0)    # (B, K)
     rel = centers[None, None] - boxes[:, :, None, None, 0, :2]                      # (B, K, h, w, 2)
     cos, sin = torch.cos(boxes[..., 0, 4]), torch.sin(boxes[..., 0, 4])
     along = rel[..., 0] * cos[..., None, None] + rel[..., 1] * sin[..., None, None]
@@ -69,6 +88,12 @@ def _flat_cells(xy: torch.Tensor, grid: BevGrid) -> torch.Tensor:
     return rows * w + cols
 
 
+def _on_grid(xy: torch.Tensor, grid: BevGrid) -> torch.Tensor:
+    """1 where (x, y) falls in a grid cell (BevGrid.cells' convention), else 0: past the edge the map can't judge."""
+    inside = (xy[..., 0] <= grid.x_range[1]) & (xy[..., 0] > grid.x_range[0]) & (xy[..., 1] <= grid.y_range[1]) & (xy[..., 1] > grid.y_range[0])
+    return inside.float()
+
+
 def _gather_steps(volume: torch.Tensor, cells: torch.Tensor) -> torch.Tensor:
     """volume (B, T, H, W), cells (B, N, T) -> (B, N, T) value of step t at each cell."""
     b, t = volume.shape[:2]
@@ -82,11 +107,16 @@ def lookup_costs(cost: torch.Tensor, traj: torch.Tensor, grid: BevGrid) -> torch
 
 def violations(traj: torch.Tensor, obstacles: torch.Tensor, drivable: torch.Tensor, cfg: NmpConfig) -> torch.Tensor:
     """Rule-violation margin gamma (B, N, T): collision with a future GT box, or leaving the road."""
-    body = traj[..., :2] + BODY_CENTER_M * torch.stack([torch.cos(traj[..., 2]), torch.sin(traj[..., 2])], dim=-1)
-    cells = _flat_cells(body, cfg.grid)
-    collide = _gather_steps(obstacles.float(), cells)
-    on_road = drivable.float().flatten(1).gather(1, cells.flatten(1)).view(cells.shape)
-    return cfg.gamma_collision * collide + cfg.gamma_offroad * (1.0 - on_road)
+    heading = torch.stack([torch.cos(traj[..., 2]), torch.sin(traj[..., 2])], dim=-1)
+    offsets = torch.as_tensor(body_points(cfg), dtype=traj.dtype, device=traj.device)
+    points = _flat_cells(traj[..., None, :2] + offsets[:, None] * heading[..., None, :], cfg.grid)  # (B, N, T, P)
+    b, n, t, p = points.shape
+    hits = _gather_steps(obstacles.float(), points.permute(0, 1, 3, 2).reshape(b, n * p, t)).view(b, n, p, t)
+    collide = hits.amax(dim=2)
+    centre = traj[..., :2] + BODY_CENTER_M * heading
+    cells = _flat_cells(centre, cfg.grid)
+    off_road = 1.0 - drivable.float().flatten(1).gather(1, cells.flatten(1)).view(cells.shape)
+    return cfg.gamma_collision * collide + cfg.gamma_offroad * off_road * _on_grid(centre, cfg.grid)
 
 
 def planning_loss(cost: torch.Tensor, gt: torch.Tensor, negatives: torch.Tensor, gamma: torch.Tensor, grid: BevGrid) -> torch.Tensor:

@@ -17,7 +17,7 @@ def _sample(token: str, k: int) -> NmpSample:
     valid = np.zeros((k, 7), bool)
     valid[:, :2] = True  # present now and at step 1 only
     return NmpSample(token, "scene", np.array([0, 5, (27 * H + 3) * W + 7], np.uint32), masks,
-                     np.zeros((6, 3), np.float32), 3.0, 0.0, boxes, valid, np.zeros(k, np.int8))
+                     np.zeros((6, 3), np.float32), 3.0, 0.0, boxes, valid, np.zeros(k, np.int8), np.ones(k, np.int32))
 
 
 def _dataset(tmp_path, samples):
