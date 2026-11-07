@@ -121,7 +121,7 @@ metrics.py       L2 / box collision / off-road, constant-velocity baseline
 planner.py       inference: NmpPlanner.plan(frame, lidar, map) -> PlanResult
 evaluate.py      validation metrics and the eval report
 train.py         CLI: cache / fit / eval
-render.py        planner_bev figure: scene + plan vs logged human, cost panels
+render.py        planner_bev figure: scene + plan vs logged human, tracked vehicles, cost panels
 ```
 
 ```bash
@@ -162,7 +162,7 @@ verbosity (default INFO).
 
 ## Tests
 
-`pytest tests/` covers the data layer, BEV geometry, occupancy, tracking,
+`pytest tests/` covers the data layer, BEV geometry, occupancy, the CTRV filter and tracking,
 detection geometry, the map renderer, the visualizer's view selection, and
 the NMP sampler, samples, dataset, model, losses, metrics and a CPU overfit
 run of training.

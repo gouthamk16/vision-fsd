@@ -278,7 +278,7 @@ pip install -r requirements.txt
 pytest tests/
 ```
 
-Covers the data layer, BEV geometry, occupancy, tracking, detection geometry, the map renderer, view selection, and the neural motion planner (sampler, samples, dataset, model, losses, metrics and a small overfit run of training). No GPU or dataset needed.
+Covers the data layer, BEV geometry, occupancy, the Kalman-filter tracker, detection geometry, the map renderer, view selection, and the neural motion planner (sampler, samples, dataset, model, losses, metrics and a small overfit run of training). No GPU or dataset needed.
 
 ## Models
 
@@ -292,5 +292,4 @@ Covers the data layer, BEV geometry, occupancy, tracking, detection geometry, th
 
 ## Todo
 
-- Extended Kalman filters for trajectory mapping and path tracking (design and plan in `docs/superpowers/`)
 - Lane detection (probably using a pretrained model, training a lane det model today is useless)
