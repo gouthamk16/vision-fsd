@@ -164,3 +164,16 @@ def test_focal_loss_prefers_the_target_heatmap():
     matching = NmpOutput(torch.log(p) - torch.log1p(-p), reg, cost)
     flat = NmpOutput(torch.full_like(cls, -2.0), reg, cost)
     assert detection_loss(matching, targets) < detection_loss(flat, targets)
+
+
+def test_each_peak_regresses_its_own_box_where_boxes_overlap():
+    # A long vehicle whose footprint covers the centre cell of a car parked across its end.
+    boxes = torch.zeros(1, 2, T + 1, 5)
+    boxes[0, 0, :] = torch.tensor([2.0, 1.0, 2.0, 6.0, 0.0])
+    boxes[0, 1, :] = torch.tensor([4.3, 1.2, 2.0, 4.6, math.pi / 2])  # off cell boundaries: inside the long box
+    car = CLASS_NAMES.index("car")
+    cls, reg, _ = detection_targets(boxes, torch.ones(1, 2, T + 1, dtype=torch.bool), torch.tensor([[car, car]]), torch.tensor([[9, 9]]), CFG)
+    i, j = _centre_cell(4.3, 1.2)
+    assert cls[0, 0, i, j] == 1.0
+    centers = cell_centers(CFG)
+    assert np.allclose([centers[i, j, 0] + 4 * reg[0, 0, i, j], centers[i, j, 1] + 4 * reg[0, 1, i, j]], [4.3, 1.2], atol=1e-4)

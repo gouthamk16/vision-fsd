@@ -91,7 +91,8 @@ def detection_targets(boxes: torch.Tensor, box_valid: torch.Tensor, box_class: t
     across = -rel[..., 0] * sin[..., None, None] + rel[..., 1] * cos[..., None, None]
     inside = (along.abs() <= boxes[..., 0, 3, None, None] / 2) & (across.abs() <= boxes[..., 0, 2, None, None] / 2) & owner[..., None, None]
     positive = inside.any(dim=1)                                                    # (B, h, w)
-    idx = inside.float().argmax(dim=1)                                              # owning box per cell
+    # Where boxes overlap, a cell regresses the box whose centre is nearest, so every heatmap peak regresses its own box.
+    idx = rel.norm(dim=-1).masked_fill(~inside, torch.inf).argmin(dim=1)            # owning box per cell
     picked = torch.gather(boxes, 1, idx.flatten(1)[..., None, None].expand(-1, -1, *boxes.shape[2:]))
     picked = picked.view(*idx.shape, *boxes.shape[2:])                              # (B, h, w, T+1, 5)
     valid = torch.gather(box_valid, 1, idx.flatten(1)[..., None].expand(-1, -1, box_valid.shape[2])).view(*idx.shape, -1)
