@@ -107,7 +107,8 @@ def _draw_camera(ax, frame: SurroundFrame, result: PlanResult | None, logged: np
         ax.plot(*_camera_pixels(_dense(logged), frame, camera).T, color=HUMAN, lw=2.0, ls=(0, (3, 2)))
     ax.set_xlim(0, image.shape[1])
     ax.set_ylim(image.shape[0], 0)
-    ax.set_title("front camera  ·  plan and human path projected onto the road", fontsize=9, loc="left")
+    drawn = " and ".join(name for name, shown in (("plan", result is not None), ("human path", logged is not None)) if shown)
+    ax.set_title("front camera" + (f"  ·  {drawn} projected onto the road" if drawn else ""), fontsize=9, loc="left")
 
 
 def _draw_scene(ax, frame: SurroundFrame, points: np.ndarray, map_renderer: NuScenesMapRenderer | None) -> None:
