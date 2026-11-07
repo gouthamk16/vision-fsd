@@ -36,6 +36,11 @@ class TrackedObject:
     smoothed: Box3D            # the detection moved to the filtered centre and heading
 
 
+# Coast through up to two missed 2 Hz keyframes. Keyframes are only ~0.5 s apart, so a limit of exactly one period
+# would retire a track on one miss or not depending on timestamp jitter.
+MAX_AGE_S = 1.2
+
+
 @dataclass
 class _Track:
     class_name: str
@@ -49,18 +54,23 @@ class _EkfTracker:
         self.min_speed_mps = min_speed_mps
         self.max_age_s = max_age_s
         self._scene_token: str | None = None
+        self._count = 0
         self.reset()
 
     def reset(self) -> None:
         self._tracks: dict[str, _Track] = {}
         self._now: int | None = None
 
-    def _associate(self, boxes: list[Box3D]) -> dict[int, str]:
-        """Detection index -> existing track id."""
+    def _associate(self, boxes: list[Box3D], measured: np.ndarray) -> dict[int, str]:
+        """Detection index -> existing track id; `measured` is each detection's global (px, py, yaw)."""
         raise NotImplementedError
 
     def _new_id(self, box: Box3D) -> str:
         raise NotImplementedError
+
+    def _fresh_id(self, prefix: str) -> str:
+        self._count += 1
+        return f"{prefix}{self._count - 1}"
 
     def update(self, frame: SurroundFrame, boxes: list[Box3D]) -> list[TrackedObject]:
         """One TrackedObject per detection, in order."""
@@ -71,10 +81,11 @@ class _EkfTracker:
             for track in self._tracks.values():
                 track.ekf.predict((frame.timestamp_us - self._now) / 1_000_000.0)
         self._now = frame.timestamp_us
-        match = self._associate(boxes, frame) if self._tracks else {}
+        measured = np.array([_measurement(box, frame) for box in boxes]).reshape(-1, 3)
+        match = self._associate(boxes, measured) if self._tracks else {}
         out = []
         for i, box in enumerate(boxes):
-            z = _measurement(box, frame)
+            z = measured[i].copy()
             track_id = match.get(i)
             if track_id is None:
                 track_id = self._new_id(box)
@@ -113,35 +124,33 @@ def _measurement(box: Box3D, frame: SurroundFrame) -> np.ndarray:
 class GtVelocityTracker(_EkfTracker):
     """Tracks keyed by the stable nuScenes instance token (the oracle)."""
 
-    def __init__(self, horizons_s: tuple[float, ...] = (1.0, 2.0, 3.0), min_speed_mps: float = 0.5, max_age_s: float = 0.5):
+    def __init__(self, horizons_s: tuple[float, ...] = (1.0, 2.0, 3.0), min_speed_mps: float = 0.5, max_age_s: float = MAX_AGE_S):
         super().__init__(horizons_s, min_speed_mps, max_age_s)
 
-    def _associate(self, boxes: list[Box3D], frame: SurroundFrame) -> dict[int, str]:
-        return {i: box.instance_token for i, box in enumerate(boxes) if box.instance_token in self._tracks}
+    def _associate(self, boxes: list[Box3D], measured: np.ndarray) -> dict[int, str]:
+        return {i: box.instance_token for i, box in enumerate(boxes) if box.instance_token and box.instance_token in self._tracks}
 
     def _new_id(self, box: Box3D) -> str:
-        return box.instance_token
+        # A box without a token can't be followed: a track of its own that nothing will match again.
+        return box.instance_token or self._fresh_id("untracked")
 
 
 class PredictionVelocityTracker(_EkfTracker):
     """Greedy nearest-by-class association against predicted track positions, for identity-free detections."""
 
-    def __init__(self, horizons_s: tuple[float, ...] = (1.0, 2.0, 3.0), min_speed_mps: float = 0.5, max_age_s: float = 0.5, gate_m: float = 5.0):
+    def __init__(self, horizons_s: tuple[float, ...] = (1.0, 2.0, 3.0), min_speed_mps: float = 0.5, max_age_s: float = MAX_AGE_S, gate_m: float = 5.0):
         super().__init__(horizons_s, min_speed_mps, max_age_s)
         self.gate_m = gate_m
-        self._next_id = 0
 
     def _new_id(self, box: Box3D) -> str:
-        self._next_id += 1
-        return f"p{self._next_id - 1}"
+        return self._fresh_id("p")
 
-    def _associate(self, boxes: list[Box3D], frame: SurroundFrame) -> dict[int, str]:
+    def _associate(self, boxes: list[Box3D], measured: np.ndarray) -> dict[int, str]:
         if not boxes:
             return {}
         ids = list(self._tracks)
         predicted = np.array([self._tracks[k].ekf.x[:2] for k in ids])
-        xy = np.array([_measurement(box, frame)[:2] for box in boxes])
-        dist = np.linalg.norm(xy[:, None] - predicted[None], axis=2)
+        dist = np.linalg.norm(measured[:, None, :2] - predicted[None], axis=2)
         dist[np.array([b.class_name for b in boxes])[:, None] != np.array([self._tracks[k].class_name for k in ids])[None]] = np.inf
         pairs = np.argwhere(dist <= self.gate_m)
         match: dict[int, str] = {}

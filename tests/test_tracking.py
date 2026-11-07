@@ -101,3 +101,18 @@ def test_smoothed_boxes_jitter_less_than_detections():
         smooth.append(obj.smoothed.center_ego[:2])
     # Across the heading the filter all but removes it; along it, the noise is partly read as speed changes.
     assert np.linalg.norm(np.std(smooth[10:], axis=0)) < 0.7 * np.linalg.norm(np.std(raw[10:], axis=0))
+
+
+def test_a_track_survives_one_missed_keyframe_with_timestamp_jitter():
+    tracker = PredictionVelocityTracker()
+    first = tracker.update(make_frame(yaw_pose(), 0), [_box([20.0, 0.0, 0.0])])[0].track_id
+    tracker.update(make_frame(yaw_pose(), 510_000), [])  # keyframes are ~0.5 s apart, not exactly
+    assert tracker.update(make_frame(yaw_pose(), 1_010_000), [_box([20.0, 0.0, 0.0])])[0].track_id == first
+
+
+def test_gt_boxes_without_an_instance_token_do_not_share_a_track():
+    tracker = GtVelocityTracker()
+    tracker.update(_frame(0), [_box([20.0, 0.0, 0.0]), _box([-10.0, 5.0, 0.0])])
+    out = tracker.update(_frame(1), [_box([22.5, 0.0, 0.0]), _box([-10.0, 5.0, 0.0])])
+    assert [o.speed_mps for o in out] == [0.0, 0.0]
+    assert np.allclose(out[0].smoothed.center_ego[:2], [22.5, 0.0])
