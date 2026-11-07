@@ -84,12 +84,11 @@ Trained 20 epochs on 139 nuScenes train scenes (4,396 samples), evaluated on the
 |---|---|---|---|
 | human driver (logged) | 0 / 0 / 0 | 0.00 / 0.00 / 0.00 | 0.00 |
 | constant velocity | 0.40 / 1.16 / 2.33 | 0.00 / 0.41 / 2.24 | 5.70 |
-| **NMP, last epoch** | 0.47 / 1.58 / 3.47 | 0.00 / 0.00 / 1.12 | 0.00 |
-| NMP, best epoch by val collision (17) | 0.46 / 1.56 / 3.42 | 0.00 / 0.00 / 0.81 | 0.00 |
-| NMP v2: whole-footprint collision margin, longer-span curvature (last epoch) | 0.49 / 1.65 / 3.60 | 0.00 / 0.10 / 1.02 | 0.00 |
+| **NMP, last epoch** | 0.49 / 1.65 / 3.60 | 0.00 / 0.10 / 1.02 | 0.00 |
+| NMP, best epoch by val collision (13) | 0.49 / 1.65 / 3.60 | 0.00 / 0.00 / 0.61 | 0.00 |
 | NMP reference ([Khurana et al., ECCV 2022](https://arxiv.org/abs/2210.01917), full val, no map) | 0.53 / 1.25 / 2.67 | 0.04 / 0.12 / 0.87 | - |
 
-The last epoch is the honest number; the best epoch was picked on the same val split, so its collision rate is optimistic. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), and it travels 17.8 m in 3 s against the human's 19.2 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m is 0.49, scored like the nuScenes detection eval: vehicles within 50 m that LiDAR actually hit and that lie inside the model's grid. Retraining with the collision margin checked over the whole ego footprint (v2) did not help: 3 s collisions moved by one case in 983 (1.12% to 1.02%, within noise) while L2 grew to 3.60 m, AP fell to 0.45 and plans got slightly shorter (17.5 m in 3 s), so v1 stays the reference model. Implementation in [fsd/nmp/](fsd/nmp/).
+The last epoch is the honest number; the best epoch was picked on the same val split, so its collision rate is optimistic. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), and it travels 17.5 m in 3 s against the human's 19.2 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m is 0.45, scored like the nuScenes detection eval: vehicles within 50 m that LiDAR actually hit and that lie inside the model's grid. Implementation in [fsd/nmp/](fsd/nmp/).
 
 ### Results
 
