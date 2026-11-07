@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from fsd.nmp.config import NmpConfig
-from fsd.nmp.dataset import MirrorSampler, NmpDataset, collate
+from fsd.nmp.dataset import MirrorSampler, NmpDataset, collate, make_loader
 from fsd.nmp.samples import NmpSample, save_sample
 
 CFG = NmpConfig()
@@ -88,3 +88,11 @@ def test_limit_keeps_the_first_samples(tmp_path):
     for token in "abc":
         save_sample(_sample(token, 0), tmp_path / "val" / f"{token}.npz")
     assert len(NmpDataset(tmp_path, "val", CFG, limit=2)) == 2
+
+
+def test_shuffle_without_a_generator_differs_between_loaders(tmp_path):
+    (tmp_path / "train").mkdir()
+    for i in range(20):
+        save_sample(_sample(f"s{i:02d}", 0), tmp_path / "train" / f"s{i:02d}.npz")
+    orders = [list(make_loader(tmp_path, "train", CFG, 1, 0, None, True).sampler) for _ in range(2)]
+    assert orders[0] != orders[1]

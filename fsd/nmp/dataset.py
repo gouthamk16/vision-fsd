@@ -108,7 +108,11 @@ def collate(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
 def make_loader(
     cache_dir: Path, split: str, cfg: NmpConfig, batch_size: int, workers: int, limit: int | None, shuffle: bool, order: torch.Generator | None = None
 ) -> DataLoader:
-    """`order` alone drives the shuffle and mirroring, so reseeding it before an epoch fixes that epoch (train.fit relies on it)."""
+    """`order` alone drives the shuffle and mirroring, so reseeding it before an epoch fixes that epoch (train.fit relies
+    on it). Without one, every loader gets a freshly seeded generator, as RandomSampler did."""
     dataset = NmpDataset(cache_dir, split, cfg, limit)
-    sampler = MirrorSampler(len(dataset), cfg.mirror_p, order if order is not None else torch.Generator()) if shuffle else None
+    if shuffle and order is None:
+        order = torch.Generator()
+        order.seed()
+    sampler = MirrorSampler(len(dataset), cfg.mirror_p, order) if shuffle else None
     return DataLoader(dataset, batch_size, sampler=sampler, num_workers=workers, collate_fn=collate, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)
