@@ -75,3 +75,11 @@ def test_resume_refuses_a_rebuilt_train_set(tmp_path):
     _write_cache(tmp_path / "cache", np.random.default_rng(1), count=6)  # e.g. another blob extracted, cache rebuilt
     with pytest.raises(ValueError, match="train_samples"):
         fit(SMALL, tmp_path / "cache", tmp_path / "out", resume=True, **args)
+
+
+def test_resume_refuses_a_changed_config(tmp_path):
+    _write_cache(tmp_path / "cache", np.random.default_rng(0))
+    args = dict(epochs=2, batch_size=2, lr=1e-3, workers=0, device="cpu")
+    fit(SMALL, tmp_path / "cache", tmp_path / "out", **args)
+    with pytest.raises(ValueError, match="gamma_collision"):
+        fit(replace(SMALL, gamma_collision=100.0), tmp_path / "cache", tmp_path / "out", resume=True, **args)
