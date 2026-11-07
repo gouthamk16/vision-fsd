@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from fsd.ego_motion import wrap_angle
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.dataset import make_loader
 from fsd.nmp.metrics import REPORT_SECONDS, PlanMetrics, constant_velocity_plan
@@ -47,7 +48,7 @@ def evaluate(model: NeuralMotionPlanner, loader, cfg: NmpConfig) -> dict[str, fl
 
 
 def _match(boxes, forecasts, gt_boxes, gt_valid, gt_class, gt_points, cfg: NmpConfig):
-    """Greedy distance matching at step 0: (scores, true-positive flags, forecast errors (n, 3), n_gt).
+    """Greedy distance matching at step 0: (scores, true-positive flags, forecast errors (n, 3), n_gt, heading errors in deg).
 
     Like the nuScenes detection eval, ground truth the sensor never saw (no LiDAR points) is not a target,
     and neither is ground truth outside the model's grid.
@@ -57,7 +58,7 @@ def _match(boxes, forecasts, gt_boxes, gt_valid, gt_class, gt_points, cfg: NmpCo
     on_grid = cfg.grid.cells(gt_boxes[:, 0, :2])[2]
     gt_rows = np.flatnonzero(gt_valid[:, 0] & np.isin(gt_class, detect) & near & on_grid & (gt_points > 0))
     free = set(gt_rows.tolist())
-    scores, tps, errors = [], [], []
+    scores, tps, errors, headings = [], [], [], []
     for i in np.argsort([-b.score for b in boxes]):
         if np.hypot(*forecasts[i, 0, :2]) > MAX_RANGE_M:
             continue
@@ -70,7 +71,8 @@ def _match(boxes, forecasts, gt_boxes, gt_valid, gt_class, gt_points, cfg: NmpCo
             free.discard(row)
             steps = [2 * s for s in REPORT_SECONDS]
             errors.append([np.hypot(*(gt_boxes[row, k, :2] - forecasts[i, k, :2])) if gt_valid[row, k] else np.nan for k in steps])
-    return scores, tps, errors, len(gt_rows)
+            headings.append(abs(np.degrees(wrap_angle(boxes[i].yaw_ego - gt_boxes[row, 0, 4]))))
+    return scores, tps, errors, len(gt_rows), headings
 
 
 def average_precision(scores: list[float], tps: list[bool], n_gt: int) -> float:
@@ -90,7 +92,7 @@ def report(weights: Path, cache_dir: Path, split: str, cfg: NmpConfig) -> str:
     model = NeuralMotionPlanner(cfg).to(device)
     model.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True)["model"])
     nmp, cv, expert = PlanMetrics(), PlanMetrics(), PlanMetrics()
-    scores, tps, errors, n_gt, travel = [], [], [], 0, []
+    scores, tps, errors, n_gt, headings, travel = [], [], [], 0, [], []
     for batch, out, plans in _plans(model, make_loader(cache_dir, split, cfg, 4, 4, None, False), cfg):
         boxes, forecasts = decode_detections(out, cfg, AP_THRESHOLD)
         for b, plan in enumerate(plans):
@@ -99,12 +101,13 @@ def report(weights: Path, cache_dir: Path, split: str, cfg: NmpConfig) -> str:
             cv.add(constant_velocity_plan(float(batch["v0"][b]), cfg), *args)
             expert.add(batch["ego_future"][b], *args)
             travel.append((np.hypot(*plan[-1, :2]), np.hypot(*batch["ego_future"][b][-1, :2])))
-            s, t, e, n = _match(boxes[b], forecasts[b], batch["boxes"][b], batch["box_valid"][b], batch["box_class"][b], batch["box_points"][b], cfg)
-            scores, tps, errors, n_gt = scores + s, tps + t, errors + e, n_gt + n
+            s, t, e, n, h = _match(boxes[b], forecasts[b], batch["boxes"][b], batch["box_valid"][b], batch["box_class"][b], batch["box_points"][b], cfg)
+            scores, tps, errors, n_gt, headings = scores + s, tps + t, errors + e, n_gt + n, headings + h
     rows = {"expert (logged)": expert.summary(), "CV baseline": cv.summary(), "NMP (ours)": nmp.summary()}
     planned, logged = np.mean(travel, axis=0)
     table = _table(rows, average_precision(scores, tps, n_gt), np.array(errors).reshape(-1, 3))
-    return f"{table}\nmean distance from start at 3 s: NMP {planned:.2f} m | expert {logged:.2f} m"
+    heading = f"median {np.median(headings):.1f} deg, flipped (>150 deg) {100 * np.mean(np.array(headings) > 150):.1f}%" if headings else "n/a"
+    return f"{table}\nheading error of matched: {heading}\nmean distance from start at 3 s: NMP {planned:.2f} m | expert {logged:.2f} m"
 
 
 def _table(rows: dict[str, dict], ap: float, errors: np.ndarray) -> str:

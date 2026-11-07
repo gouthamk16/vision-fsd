@@ -103,7 +103,7 @@ def test_match_ignores_vehicles_beyond_eval_range():
     forecasts = np.zeros((2, T + 1, 3), np.float32)
     forecasts[0, :, 0], forecasts[1, :, 0] = 10.0, 60.0
     dets = [Box3D("car", np.array([x, 0.0, 0.8]), np.array([1.9, 4.6, 1.6]), 0.0, 0.9) for x in (10.0, 60.0)]
-    scores, tps, _, n_gt = _match(dets, forecasts, gt, np.ones((2, T + 1), bool), np.array([car, car]), np.array([9, 9]), NmpConfig())
+    scores, tps, _, n_gt, _ = _match(dets, forecasts, gt, np.ones((2, T + 1), bool), np.array([car, car]), np.array([9, 9]), NmpConfig())
     assert n_gt == 1 and scores == [0.9] and tps == [True]
 
 
@@ -124,7 +124,7 @@ def test_match_ignores_vehicles_without_lidar_points_or_outside_the_grid():
     gt[:, :, 0] = 3.0
     gt[2, :, 1] = 4.0  # CFG's grid spans y = ±4.8 m; this one sits inside
     gt[1, :, 1] = 6.0  # and this one outside it
-    scores, tps, _, n_gt = _match([], np.zeros((0, T + 1, 3)), gt, np.ones((3, T + 1), bool), np.full(3, car), np.array([0, 9, 9]), CFG)
+    scores, tps, _, n_gt, _ = _match([], np.zeros((0, T + 1, 3)), gt, np.ones((3, T + 1), bool), np.full(3, car), np.array([0, 9, 9]), CFG)
     assert n_gt == 1
 
 
@@ -178,3 +178,14 @@ def test_heading_without_a_side_still_lies_on_the_axis():
     boxes, _ = decode_detections(out, CFG)
     off = abs(math.degrees(float(wrap_angle(boxes[0][0].yaw_ego - math.radians(150.0)))))
     assert min(off, 180.0 - off) < 1e-3
+
+
+def test_match_reports_the_heading_error_of_each_match():
+    car = CLASS_NAMES.index("car")
+    gt = np.zeros((1, T + 1, 5), np.float32)
+    gt[0, :, :4] = [3.0, 0.0, 1.9, 4.6]  # heading 0
+    yaw = math.radians(170)  # matched by position, but facing the wrong way
+    det = [Box3D("car", np.array([3.0, 0.2, 0.8]), np.array([1.9, 4.6, 1.6]), yaw, 0.9)]
+    forecast = np.tile([3.0, 0.2, yaw], (1, T + 1, 1))
+    *_, headings = _match(det, forecast, gt, np.ones((1, T + 1), bool), np.array([car]), np.array([9]), CFG)
+    assert np.allclose(headings, [170.0])
