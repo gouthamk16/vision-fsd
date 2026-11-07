@@ -65,14 +65,14 @@ The world model combines the separate BEV layers into one state object: temporal
 
 Up to here the world model only knew *where* other cars and people were - a frozen snapshot. This layer adds **how fast each one is moving, which way, and where it will be in the next few seconds**.
 
-The idea is simple: look at the same object in two snapshots taken half a second apart, measure how far it moved, and divide by the time. That gives its speed and direction. To guess the future, we assume it keeps going the same way (so its position in 1, 2, and 3 seconds is just current position + speed x time).
+Each tracked object carries a small Kalman filter with a constant turn-rate and velocity (CTRV) motion model: it keeps a running estimate of position, heading, speed and turn rate, and every new sighting nudges that estimate rather than replacing it. Dividing the distance between two noisy snapshots by the time between them, which is what this layer did first, turns half a metre of detector wobble into a metre per second of fake speed; the filter averages it out. It also predicts along a curve when the object is turning, and keeps a track alive through a missed detection or two. Implementation in [fsd/ekf.py](fsd/ekf.py).
 
 The only hard part is knowing which object in this frame is the *same* object from the last frame. We do it two ways:
 
 - **The answer-key way** (`GtVelocityTracker`): the nuScenes dataset labels every object with a permanent ID, so the match is perfect. This is our gold standard. Drawn in amber.
-- **The real way** (`PredictionVelocityTracker`): our CenterPoint detector gives no IDs, so we match each object to the nearest object of the same type (car, truck, ...) in the previous frame. Drawn in orange.
+- **The real way** (`PredictionVelocityTracker`): our CenterPoint detector gives no IDs, so we match each detection to the nearest track of the same type (car, truck, ...), measured from where the filter predicts that track to be now. Drawn in orange.
 
-When we check the real way against the answer key on scene 0, the speeds agree to within about **0.25 m/s** - basically identical - so tracking real detections works nearly as well as the labelled baseline. In the `world_bev` view each moving object gets an arrow (where it is heading), a faint outline (where it will be in 3 seconds), and a speed tag like `5.2 m/s`. Pass `--predictions` to also show the detector's version. Implementation in [fsd/tracking.py](fsd/tracking.py).
+When we check the real way against the answer key on scene 0, the median velocity difference is **0.18 m/s** (it was 0.42 m/s with the two-snapshot difference), so tracking real detections works nearly as well as the labelled baseline. The planner view uses the same tracker on the NMP's detections. In the `world_bev` view each moving object gets an arrow (where it is heading), a faint outline (where it will be in 3 seconds), and a speed tag like `5.2 m/s`. Pass `--predictions` to also show the detector's version. Implementation in [fsd/tracking.py](fsd/tracking.py).
 
 ### Neural motion planner
 

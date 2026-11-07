@@ -72,7 +72,8 @@ bev.py               BevGrid: the single BEV pixel convention, resampling,
 bev_tensor.py        per-cell height statistics on a BevGrid
 occupancy.py         temporal log-odds fusion with ray-cast free space
   |
-world_model.py       occupancy + ego state + tracked objects (tracking.py)
+world_model.py       occupancy + ego state + tracked objects (tracking.py: one
+                     CTRV Kalman filter per track, ekf.py)
 ```
 
 Rasters are computed on a coarse grid (`--bev-resolution`, 0.25 m) and views
