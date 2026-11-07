@@ -38,6 +38,9 @@ class NmpConfig:
     # Training obstacles grow by a little more than the ego half-width, so the ego body can be tested as a few
     # points on its axis (losses.body_points).
     obstacle_dilation: float = 1.0
+    # Chance a training sample is mirrored left-right (y -> -y). nuScenes has left- and right-hand traffic and the
+    # map layers carry no lane direction, so a mirrored scene is still a plausible one.
+    mirror_p: float = 0.5
     gamma_collision: float = 200.0
     gamma_offroad: float = 100.0
     cost_clip: float = 1000.0
@@ -48,6 +51,8 @@ class NmpConfig:
         if abs(cells - round(cells)) > 1e-6 or self.obstacle_dilation <= EGO_FOOTPRINT[1][1]:
             raise ValueError(f"obstacle_dilation {self.obstacle_dilation} m must be a whole number of {self.resolution} m cells "
                              f"and exceed the ego half-width {EGO_FOOTPRINT[1][1]} m, or the body points miss overlaps")
+        if self.mirror_p > 0 and self.y_range[0] != -self.y_range[1]:
+            raise ValueError(f"mirror_p > 0 flips the grid about y = 0, so y_range {self.y_range} must be symmetric about the ego")
 
     @property
     def grid(self) -> BevGrid:

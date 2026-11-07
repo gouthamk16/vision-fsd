@@ -65,14 +65,14 @@ The world model combines the separate BEV layers into one state object: temporal
 
 Up to here the world model only knew *where* other cars and people were - a frozen snapshot. This layer adds **how fast each one is moving, which way, and where it will be in the next few seconds**.
 
-The idea is simple: look at the same object in two snapshots taken half a second apart, measure how far it moved, and divide by the time. That gives its speed and direction. To guess the future, we assume it keeps going the same way (so its position in 1, 2, and 3 seconds is just current position + speed x time).
+Each tracked object carries a small Kalman filter with a constant turn-rate and velocity (CTRV) motion model: it keeps a running estimate of position, heading, speed and turn rate, and every new sighting nudges that estimate rather than replacing it. Dividing the distance between two noisy snapshots by the time between them, which is what this layer did first, turns half a metre of detector wobble into a metre per second of fake speed; the filter averages it out. It also predicts along a curve when the object is turning, and keeps a track alive through a missed detection or two. Implementation in [fsd/ekf.py](fsd/ekf.py).
 
 The only hard part is knowing which object in this frame is the *same* object from the last frame. We do it two ways:
 
 - **The answer-key way** (`GtVelocityTracker`): the nuScenes dataset labels every object with a permanent ID, so the match is perfect. This is our gold standard. Drawn in amber.
-- **The real way** (`PredictionVelocityTracker`): our CenterPoint detector gives no IDs, so we match each object to the nearest object of the same type (car, truck, ...) in the previous frame. Drawn in orange.
+- **The real way** (`PredictionVelocityTracker`): our CenterPoint detector gives no IDs, so we match each detection to the nearest track of the same type (car, truck, ...), measured from where the filter predicts that track to be now. Drawn in orange.
 
-When we check the real way against the answer key on scene 0, the speeds agree to within about **0.25 m/s** - basically identical - so tracking real detections works nearly as well as the labelled baseline. In the `world_bev` view each moving object gets an arrow (where it is heading), a faint outline (where it will be in 3 seconds), and a speed tag like `5.2 m/s`. Pass `--predictions` to also show the detector's version. Implementation in [fsd/tracking.py](fsd/tracking.py).
+When we check the real way against the answer key on scene 0, the median velocity difference is **0.18 m/s** (it was 0.42 m/s with the two-snapshot difference), so tracking real detections works nearly as well as the labelled baseline. The planner view uses the same tracker on the NMP's detections. In the `world_bev` view each moving object gets an arrow (where it is heading), a faint outline (where it will be in 3 seconds), and a speed tag like `5.2 m/s`. Pass `--predictions` to also show the detector's version. Implementation in [fsd/tracking.py](fsd/tracking.py).
 
 ### Neural motion planner
 
@@ -84,11 +84,12 @@ Trained 20 epochs on 139 nuScenes train scenes (4,396 samples), evaluated on the
 |---|---|---|---|
 | human driver (logged) | 0 / 0 / 0 | 0.00 / 0.00 / 0.00 | 0.00 |
 | constant velocity | 0.40 / 1.16 / 2.33 | 0.00 / 0.41 / 2.24 | 5.70 |
-| **NMP, last epoch** | 0.49 / 1.65 / 3.60 | 0.00 / 0.10 / 1.02 | 0.00 |
-| NMP, best epoch by val collision (13) | 0.49 / 1.65 / 3.60 | 0.00 / 0.00 / 0.61 | 0.00 |
+| **NMP (last epoch, also the best by val collision)** | 0.45 / 1.48 / 3.22 | 0.00 / 0.10 / 0.41 | 0.00 |
 | NMP reference ([Khurana et al., ECCV 2022](https://arxiv.org/abs/2210.01917), full val, no map) | 0.53 / 1.25 / 2.67 | 0.04 / 0.12 / 0.87 | - |
 
-The last epoch is the honest number; the best epoch was picked on the same val split, so its collision rate is optimistic. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), and it travels 17.5 m in 3 s against the human's 19.2 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m is 0.45, scored in the spirit of the nuScenes detection eval: vehicles within 50 m that at least one LiDAR return of the keyframe sweep hit (nuScenes also counts radar returns) and that lie inside the model's grid. Training leaves the unhit ones out of the targets, as mmdet3d's `filter_empty_gt` does for CenterPoint. Implementation in [fsd/nmp/](fsd/nmp/).
+The last epoch was also the best one on val collisions, so no number here is picked on the split it is reported on. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), with a 3 s collision rate under half the reference's, and it travels 17.8 m in 3 s against the human's 19.2 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m is 0.74, scored in the spirit of the nuScenes detection eval: vehicles within 50 m that at least one LiDAR return of the keyframe sweep hit (nuScenes also counts radar returns) and that lie inside the model's grid. Training leaves the unhit ones out of the targets, as mmdet3d's `filter_empty_gt` does for CenterPoint.
+
+Detection follows CenterPoint rather than the paper's box cells: one Gaussian peak marks each vehicle's centre, the heading is predicted as an axis plus which end is the front (so a parked car's two look-alike directions can't average into a sideways box), and training samples are mirrored left-right half the time. Against the earlier every-cell-in-the-box head, on the same val samples at the view's 0.3 threshold: recall 47% → 69%, duplicate boxes 12 → 4 and false boxes 46 → 25 per 100 vehicles, median centre error 0.88 → 0.42 m, and parked cars' median heading error 58° → 7°. About 30% of parked cars still get front and back swapped; their footprint is the same either way. The `planner_bev` view passes the detections through the Kalman-filter tracker above, whose forecasts beat the network's own (L2 of matched vehicles at 1/2/3 s: 1.67 / 2.99 / 4.35 m vs 1.77 / 3.26 / 4.77 m; assuming they stay put: 2.45 / 4.47 / 6.33 m). Implementation in [fsd/nmp/](fsd/nmp/).
 
 ### Results
 
@@ -126,7 +127,7 @@ The last epoch is the honest number; the best epoch was picked on the same val s
   <tr>
     <td colspan="2" align="center">
       <img src="results/nuscenes_planner_bev.jpg" width="100%"><br>
-      <sub>Neural motion planner on an unseen val scene (right turn, 10 Hz) - left: the chosen 3 s plan (green) against what the human actually drove (orange, dashed), rejected samples (light blue) and detected vehicles with 3 s forecasts (blue); right: both paths projected into the front camera, and the learned cost the plan minimises at 1, 2 and 3 s (dark = preferred)</sub>
+      <sub>Neural motion planner on an unseen val scene (right turn, 10 Hz) - left: the chosen 3 s plan (green) against what the human actually drove (orange, dashed), rejected samples (light blue) and detected vehicles, tracked over time, with 3 s forecasts (blue); right: both paths projected into the front camera, and the learned cost the plan minimises at 1, 2 and 3 s (dark = preferred)</sub>
     </td>
   </tr>
   <tr>
@@ -277,7 +278,7 @@ pip install -r requirements.txt
 pytest tests/
 ```
 
-Covers the data layer, BEV geometry, occupancy, tracking, detection geometry, the map renderer, view selection, and the neural motion planner (sampler, samples, dataset, model, losses, metrics and a small overfit run of training). No GPU or dataset needed.
+Covers the data layer, BEV geometry, occupancy, the Kalman-filter tracker, detection geometry, the map renderer, view selection, and the neural motion planner (sampler, samples, dataset, model, losses, metrics and a small overfit run of training). No GPU or dataset needed.
 
 ## Models
 
@@ -291,5 +292,4 @@ Covers the data layer, BEV geometry, occupancy, tracking, detection geometry, th
 
 ## Todo
 
-- Extended Kalman filters for trajectory mapping and path tracking (design and plan in `docs/superpowers/`)
 - Lane detection (probably using a pretrained model, training a lane det model today is useless)

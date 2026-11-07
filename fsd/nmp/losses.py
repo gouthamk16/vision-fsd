@@ -7,7 +7,6 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torchvision.ops import sigmoid_focal_loss
 
 from fsd.bev import BevGrid
 from fsd.ego_motion import EGO_FOOTPRINT
@@ -42,8 +41,39 @@ def cell_centers(cfg: NmpConfig) -> torch.Tensor:
     return torch.stack([cfg.x_range[1] - (rows + 0.5) * size, cfg.y_range[1] - (cols + 0.5) * size], dim=-1)
 
 
+def _gaussian_radius(length: torch.Tensor, width: torch.Tensor, overlap: float = 0.1) -> torch.Tensor:
+    """CornerNet's radius (cells) within which a shifted box still overlaps the true one by `overlap` (as CenterPoint)."""
+    roots = []
+    for a, b, c in ((1.0, length + width, length * width * (1 - overlap) / (1 + overlap)),
+                    (4.0, 2 * (length + width), (1 - overlap) * length * width),
+                    (4 * overlap, -2 * overlap * (length + width), (overlap - 1) * length * width)):
+        roots.append((b + torch.sqrt(b**2 - 4 * a * c)) / 2)
+    return torch.minimum(torch.minimum(roots[0], roots[1]), roots[2])
+
+
+def _heatmap(boxes: torch.Tensor, owner: torch.Tensor, cfg: NmpConfig) -> torch.Tensor:
+    """(B, 1, h, w) CenterPoint target: 1 at each vehicle's centre cell, a Gaussian around it, max over vehicles.
+
+    A single peak per vehicle is what keeps the decode from finding several (the old every-cell-inside target made
+    a plateau with many). Radius at least 2 cells, as CenterPoint.
+    """
+    h, w = cfg.grid.shape[0] // STRIDE, cfg.grid.shape[1] // STRIDE
+    size = STRIDE * cfg.resolution
+    row = torch.floor((cfg.x_range[1] - boxes[..., 0, 0]) / size)                 # (B, K) centre cell
+    col = torch.floor((cfg.y_range[1] - boxes[..., 0, 1]) / size)
+    owner = owner & (row >= 0) & (row < h) & (col >= 0) & (col < w)
+    radius = _gaussian_radius(boxes[..., 0, 3] / size, boxes[..., 0, 2] / size).floor().clamp(min=2)
+    sigma = (2 * radius + 1) / 6
+    dr = torch.arange(h, device=boxes.device)[None, None, :, None] - row[..., None, None]
+    dc = torch.arange(w, device=boxes.device)[None, None, None, :] - col[..., None, None]
+    near = (dr.abs() <= radius[..., None, None]) & (dc.abs() <= radius[..., None, None]) & owner[..., None, None]
+    peaks = torch.exp(-(dr**2 + dc**2) / (2 * sigma[..., None, None] ** 2)) * near
+    return peaks.amax(dim=1, keepdim=True)
+
+
 def detection_targets(boxes: torch.Tensor, box_valid: torch.Tensor, box_class: torch.Tensor, box_points: torch.Tensor, cfg: NmpConfig):
-    """Per-cell (cls, reg, reg_mask): a cell is positive when its centre lies in a step-0 vehicle box.
+    """Per-cell (heatmap, reg, reg_mask). Regression is supervised at every cell inside a step-0 vehicle box, not
+    only at the centre as in CenterPoint: denser supervision for a small dataset, and the decode reads it at the peak.
 
     Vehicles no LiDAR return hit are left out, as the eval leaves them out: the input holds no evidence of them.
     """
@@ -61,20 +91,32 @@ def detection_targets(boxes: torch.Tensor, box_valid: torch.Tensor, box_class: t
     across = -rel[..., 0] * sin[..., None, None] + rel[..., 1] * cos[..., None, None]
     inside = (along.abs() <= boxes[..., 0, 3, None, None] / 2) & (across.abs() <= boxes[..., 0, 2, None, None] / 2) & owner[..., None, None]
     positive = inside.any(dim=1)                                                    # (B, h, w)
-    idx = inside.float().argmax(dim=1)                                              # owning box per cell
+    # Where boxes overlap, a cell regresses the box whose centre is nearest, so every heatmap peak regresses its own box.
+    idx = rel.norm(dim=-1).masked_fill(~inside, torch.inf).argmin(dim=1)            # owning box per cell
     picked = torch.gather(boxes, 1, idx.flatten(1)[..., None, None].expand(-1, -1, *boxes.shape[2:]))
     picked = picked.view(*idx.shape, *boxes.shape[2:])                              # (B, h, w, T+1, 5)
     valid = torch.gather(box_valid, 1, idx.flatten(1)[..., None].expand(-1, -1, box_valid.shape[2])).view(*idx.shape, -1)
     offset = (picked[..., :2] - centers[None, :, :, None]) / OFFSET_SCALE_M
-    reg = torch.cat([offset, picked[..., 2:4].clamp(min=1e-3).log(), torch.sin(picked[..., 4:]), torch.cos(picked[..., 4:])], dim=-1)
-    reg = reg.permute(0, 3, 4, 1, 2).flatten(1, 2)                                  # (B, (T+1)*6, h, w)
+    yaw = picked[..., 4:]
+    # The doubled angle is the vehicle's axis, the same whichever way it faces; the full angle only picks the side.
+    reg = torch.cat([offset, picked[..., 2:4].clamp(min=1e-3).log(), torch.sin(yaw), torch.cos(yaw), torch.sin(2 * yaw), torch.cos(2 * yaw)], dim=-1)
+    reg = reg.permute(0, 3, 4, 1, 2).flatten(1, 2)                                  # (B, (T+1)*REG_PER_STEP, h, w)
     mask = (valid & positive[..., None]).permute(0, 3, 1, 2)                        # (B, T+1, h, w)
-    return positive[:, None].float(), reg * mask.repeat_interleave(REG_PER_STEP, dim=1), mask
+    return _heatmap(boxes, owner, cfg), reg * mask.repeat_interleave(REG_PER_STEP, dim=1), mask
+
+
+def _focal(logits: torch.Tensor, heat: torch.Tensor) -> torch.Tensor:
+    """CenterNet's penalty-reduced focal loss (alpha 2, beta 4), per centre cell."""
+    peak = heat.eq(1.0).float()
+    p = logits.sigmoid()
+    positive = (1 - p) ** 2 * F.logsigmoid(logits) * peak
+    negative = p**2 * F.logsigmoid(-logits) * (1 - heat) ** 4 * (1 - peak)
+    return -(positive.sum() + negative.sum()) / peak.sum().clamp(min=1)
 
 
 def detection_loss(out: NmpOutput, targets) -> torch.Tensor:
     cls, reg, mask = targets
-    focal = sigmoid_focal_loss(out.cls_logits.float(), cls, alpha=0.25, gamma=2.0, reduction="sum") / cls.sum().clamp(min=1)
+    focal = _focal(out.cls_logits.float(), cls)
     entries = mask.repeat_interleave(REG_PER_STEP, dim=1)
     smooth = F.smooth_l1_loss(out.box_reg.float()[entries], reg[entries], reduction="sum") / entries.sum().clamp(min=1)
     return focal + smooth

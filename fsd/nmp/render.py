@@ -27,6 +27,7 @@ from fsd.data import CameraFrame, SurroundFrame
 from fsd.nmp.metrics import ego_footprint
 from fsd.nmp.planner import PlanResult
 from fsd.nuscenes_map import NuScenesMapRenderer
+from fsd.tracking import TrackedObject
 
 # Ego-centred and biased forward, like NAVSIM's 64 m frame. 20 px/m is above the figure's ~14 px/m,
 # so the map raster is only ever downsampled.
@@ -123,10 +124,14 @@ def _draw_scene(ax, frame: SurroundFrame, points: np.ndarray, map_renderer: NuSc
         ax.scatter(*_uv(points[keep, :2]).T, s=size, c=color, linewidths=0, rasterized=True, zorder=1)
 
 
-def _draw_agents(ax, result: PlanResult) -> None:
-    for box, track in zip(result.detections, result.forecasts):
+def _draw_agents(ax, tracked: list[TrackedObject]) -> None:
+    """Each detection at its tracked (filtered) pose, with the tracker's forecast when it is moving."""
+    for obj in tracked:
+        box = obj.smoothed
         ax.add_patch(Polygon(_uv(box.footprint), closed=True, fc=to_rgba(VEHICLE, 0.18), ec=VEHICLE, lw=1.1, zorder=3))
-        ax.plot(*_uv(track[:, :2]).T, color=VEHICLE, lw=0.9, alpha=0.75, marker="o", ms=1.8, zorder=3)
+        if len(obj.future_xy_ego):
+            path = np.vstack([box.center_ego[:2], obj.future_xy_ego])
+            ax.plot(*_uv(path).T, color=VEHICLE, lw=0.9, alpha=0.75, marker="o", ms=1.8, zorder=3)
 
 
 def _draw_paths(ax, result: PlanResult) -> None:
@@ -178,7 +183,7 @@ def _annotate(ax, frame: SurroundFrame, result: PlanResult | None, logged: np.nd
     if result is not None:
         handles += [
             Line2D([], [], color=CANDIDATE, lw=1, label=f"rejected samples ({SHOWN_CANDIDATES} of {len(result.candidates)})"),
-            Patch(fc=to_rgba(VEHICLE, 0.18), ec=VEHICLE, label="detected vehicle + 3 s forecast"),
+            Patch(fc=to_rgba(VEHICLE, 0.18), ec=VEHICLE, label="detected vehicle, tracked + 3 s forecast"),
         ]
     handles.append(Patch(fc=EGO, label="ego"))
     ax.legend(handles=handles, loc="upper left", fontsize=8, framealpha=0.92, edgecolor="#d0d0d0")
@@ -206,8 +211,11 @@ def render_planner_bev(
     cost_grid: BevGrid,
     map_renderer: NuScenesMapRenderer | None = None,
     logged: np.ndarray | None = None,
+    *,
+    tracked: list[TrackedObject],
 ) -> np.ndarray:
-    """BGR image; `result` is None while the planner waits for history, `logged` the human's future (T, 3) if known."""
+    """BGR image; `result` is None while the planner waits for history, `logged` the human's future (T, 3) if known,
+    `tracked` the planner's detections after the tracker (drawn instead of the raw per-frame boxes)."""
     fig = Figure(figsize=(16, 9), dpi=100, facecolor="white")
     outer = fig.add_gridspec(1, 2, width_ratios=(1.0, 1.02), left=0.01, right=0.965, top=0.94, bottom=0.025, wspace=0.04)
     right = outer[1].subgridspec(2, 1, height_ratios=(1.0, 0.68), hspace=0.12)
@@ -217,7 +225,7 @@ def render_planner_bev(
     if logged is not None:  # thin and above the plan, so it stays visible where the two overlap
         ax.plot(*_path(logged).T, color=HUMAN, lw=1.6, ls=(0, (3, 2)), zorder=6.5)
     if result is not None:
-        _draw_agents(ax, result)
+        _draw_agents(ax, tracked)
         _draw_paths(ax, result)
         _draw_costs(fig, right[1].subgridspec(1, 4, width_ratios=(1, 1, 1, 0.06), wspace=0.08), result, cost_grid)
     _annotate(ax, frame, result, logged)

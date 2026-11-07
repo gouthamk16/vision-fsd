@@ -1,7 +1,18 @@
 # CTRV EKF for object tracking — design
 
 Date: 2026-06-09
-Status: approved for spec review
+Status: implemented 2026-11-07 (`fsd/ekf.py`, `fsd/tracking.py`), with these departures:
+
+- The predict Jacobian is numerical (central differences, step 1e-3, past the straight-line branch's 1e-4), not
+  hand-derived.
+- `max_age` is 1.2 s, not 0.5 s: keyframes are ~0.5 s apart, so 0.5 s retired a track on one miss or not depending
+  on timestamp jitter.
+- A heading measurement more than 120 deg from the track's is read reversed (a box looks the same from either end).
+- A frame no later than the previous one resets the tracker, as a new scene does.
+- `TrackedObject` gains `smoothed` (the detection at the filtered pose) instead of `position_cov_ego`; the 1-sigma
+  ellipse in `world_bev` is not built.
+- On scene 0, CenterPoint detections vs the instance-token oracle: median velocity difference 0.18 m/s, against
+  0.42 m/s with the frame difference this replaced.
 
 ## Motivation
 

@@ -140,6 +140,18 @@ Removed on 2026-11-04. Kept here as the motivation.
 | $\gamma$ rule violations | Collision with GT future boxes, leaving the drivable area. Red light is not available |
 | 1.4M frames | Full trainval has ~28k train keyframes. Our blobs 01-02 give ~4.4k (139 train scenes) plus 31 val scenes |
 
+### Where this repo departs from the paper
+
+- **Detection head.** Instead of the paper's 12-anchor SSD head, the first version here marked every cell inside a
+  box as positive. Each car then scored as a plateau with several peaks: 12 duplicate boxes per 100 vehicles on val.
+  A CenterPoint centre heatmap (one Gaussian peak per vehicle, CenterNet focal loss) brought that to 4.
+- **Heading.** Regressing sin/cos averaged a parked car's two look-alike directions into sideways boxes (58 deg median
+  error). The head also regresses the doubled angle (the axis); the full angle only picks the front: 7 deg.
+- **Augmentation.** Half the training samples are mirrored left-right. No rotations: every sampled trajectory starts
+  at heading 0, so rotating the scene would break the planner frame.
+- **Forecasts shown in `planner_bev`.** Detections go through a CTRV Kalman-filter tracker (`fsd/ekf.py`), whose
+  forecasts beat the head's on val (4.35 vs 4.77 m at 3 s). The head's forecasts are still trained, and scored by `eval`.
+
 ### Caveats
 
 - **On nuScenes, open-loop L2 is dominated by ego status.** Zhai et al. 2023 (*Rethinking the

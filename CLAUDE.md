@@ -72,7 +72,8 @@ bev.py               BevGrid: the single BEV pixel convention, resampling,
 bev_tensor.py        per-cell height statistics on a BevGrid
 occupancy.py         temporal log-odds fusion with ray-cast free space
   |
-world_model.py       occupancy + ego state + tracked objects (tracking.py)
+world_model.py       occupancy + ego state + tracked objects (tracking.py: one
+                     CTRV Kalman filter per track, ekf.py)
 ```
 
 Rasters are computed on a coarse grid (`--bev-resolution`, 0.25 m) and views
@@ -113,14 +114,14 @@ nothing imports it except `visualize` (the `planner_bev` view).
 config.py        NmpConfig: grid (140.8 x 80 m @ 0.2 m), sweeps, horizon, losses
 trajectories.py  straight / circle / clothoid sampler (curvature linear in arc length)
 samples.py       keyframe -> NmpSample (sparse voxels, map masks, ego future, boxes)
-dataset.py       densify cached samples, rasterise future obstacles, DataLoader
-model.py         PIXOR backbone + detection/forecast head + cost-volume head
-losses.py        focal + smooth-L1 perception loss, max-margin planning loss
+dataset.py       densify cached samples, rasterise future obstacles, left-right mirror augmentation
+model.py         PIXOR backbone + centre-heatmap detection/forecast head + cost-volume head
+losses.py        CenterPoint heatmap + smooth-L1 perception loss (heading as axis + side), max-margin planning loss
 metrics.py       L2 / box collision / off-road, constant-velocity baseline
 planner.py       inference: NmpPlanner.plan(frame, lidar, map) -> PlanResult
 evaluate.py      validation metrics and the eval report
 train.py         CLI: cache / fit / eval
-render.py        planner_bev figure: scene + plan vs logged human, cost panels
+render.py        planner_bev figure: scene + plan vs logged human, tracked vehicles, cost panels
 ```
 
 ```bash
@@ -161,7 +162,7 @@ verbosity (default INFO).
 
 ## Tests
 
-`pytest tests/` covers the data layer, BEV geometry, occupancy, tracking,
+`pytest tests/` covers the data layer, BEV geometry, occupancy, the CTRV filter and tracking,
 detection geometry, the map renderer, the visualizer's view selection, and
 the NMP sampler, samples, dataset, model, losses, metrics and a CPU overfit
 run of training.

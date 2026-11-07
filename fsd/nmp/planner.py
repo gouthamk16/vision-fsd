@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from fsd.bev import BevGrid
 from fsd.data import LidarFrame, SurroundFrame
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.losses import OFFSET_SCALE_M, cell_centers, lookup_costs
-from fsd.nmp.model import REG_PER_STEP, NeuralMotionPlanner, NmpOutput
+from fsd.nmp.model import REG_PER_STEP, NeuralMotionPlanner, NmpOutput, load_weights
 from fsd.nmp.samples import dense_input, ego_state, sweep_points, voxelize
 from fsd.nmp.trajectories import sample_trajectories
 from fsd.nuscenes_map import NuScenesMapRenderer
@@ -29,7 +30,6 @@ class PlanResult:
     costs: np.ndarray         # (N,) summed cost per candidate
     cost_volume: np.ndarray   # (T, H, W)
     detections: list[Box3D]
-    forecasts: np.ndarray     # (K, T+1, 3) x, y, yaw per detection and step
     v0: float
 
 
@@ -51,8 +51,8 @@ def _suppress(xy: np.ndarray, scores: np.ndarray, radius: float) -> np.ndarray:
 def decode_detections(out: NmpOutput, cfg: NmpConfig, threshold: float = 0.3) -> tuple[list[list[Box3D]], list[np.ndarray]]:
     """Vehicle boxes at 3x3 score peaks above `threshold`, one per vehicle, with their forecast poses per step.
 
-    Every cell inside a box is a positive, so a vehicle's score is a plateau; in bf16 neighbouring cells tie
-    and each is a 3x3 peak. Peaks closer than SUPPRESS_RADIUS_M are merged into the best-scoring one.
+    Training puts one Gaussian peak at each vehicle's centre, but in bf16 neighbouring cells can still tie and
+    each be a 3x3 peak, so peaks closer than SUPPRESS_RADIUS_M are merged into the best-scoring one.
     """
     score = out.cls_logits.float().sigmoid()
     peaks = (score == F.max_pool2d(score, 3, stride=1, padding=1)) & (score > threshold)
@@ -61,9 +61,12 @@ def decode_detections(out: NmpOutput, cfg: NmpConfig, threshold: float = 0.3) ->
     boxes, forecasts = [], []
     for b in range(score.shape[0]):
         rows, cols = torch.nonzero(peaks[b, 0], as_tuple=True)
-        reg = out.box_reg[b].float().view(steps, REG_PER_STEP, *score.shape[2:])[:, :, rows, cols]  # (T+1, 6, K)
+        reg = out.box_reg[b].float().view(steps, REG_PER_STEP, *score.shape[2:])[:, :, rows, cols]  # (T+1, REG_PER_STEP, K)
         xy = centers[rows, cols].T[None] + OFFSET_SCALE_M * reg[:, :2]                              # (T+1, 2, K)
-        yaw = torch.atan2(reg[:, 4], reg[:, 5])                                                     # (T+1, K)
+        axis = 0.5 * torch.atan2(reg[:, 6], reg[:, 7])                                              # (T+1, K)
+        # The axis is reliable even for a parked car; the full angle only chooses which end is the front.
+        flip = torch.cos(torch.atan2(reg[:, 4], reg[:, 5]) - axis) < 0
+        yaw = torch.remainder(axis + math.pi * flip + math.pi, 2 * math.pi) - math.pi
         size = reg[0, 2:4].exp()                                                                    # (2, K): w, l
         poses = torch.cat([xy, yaw[:, None]], dim=1).permute(2, 0, 1).cpu().numpy()                  # (K, T+1, 3)
         scores, size = score[b, 0, rows, cols].cpu().numpy(), size.cpu().numpy()
@@ -81,7 +84,7 @@ class NmpPlanner:
         self.cfg = cfg
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model = NeuralMotionPlanner(cfg)
-        self.model.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True)["model"])
+        load_weights(self.model, torch.load(weights, map_location="cpu", weights_only=True)["model"], weights)
         self.model.to(self.device).eval()
         self.generator = torch.Generator(device=self.device).manual_seed(0)
 
@@ -103,13 +106,12 @@ class NmpPlanner:
         )[0]
         cost = out.cost[0].float()
         best, costs = select_plan(cost, candidates, self.cfg.grid)
-        boxes, forecasts = decode_detections(out, self.cfg)
+        boxes, _ = decode_detections(out, self.cfg)  # the view forecasts with the tracker, which measured better
         return PlanResult(
             plan=candidates[best].cpu().numpy(),
             candidates=candidates.cpu().numpy(),
             costs=costs.cpu().numpy(),
             cost_volume=cost.cpu().numpy(),
             detections=boxes[0],
-            forecasts=forecasts[0],
             v0=v0,
         )

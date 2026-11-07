@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset, RandomSampler, Subset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from fsd.bev import SHIFT, fixed_point
 from fsd.nmp.config import NmpConfig
@@ -35,16 +35,19 @@ def obstacle_masks(sample: NmpSample, cfg: NmpConfig) -> np.ndarray:
 
 
 class NmpDataset(Dataset):
-    def __init__(self, cache_dir: Path, split: str, cfg: NmpConfig):
-        self.paths = sorted((Path(cache_dir) / split).glob("*.npz"))
+    """Cached samples; a key of (index, True) returns that sample mirrored left-right (see MirrorSampler)."""
+
+    def __init__(self, cache_dir: Path, split: str, cfg: NmpConfig, limit: int | None = None):
+        self.paths = sorted((Path(cache_dir) / split).glob("*.npz"))[:limit]
         self.cfg = cfg
 
     def __len__(self) -> int:
         return len(self.paths)
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, key: int | tuple[int, bool]) -> dict[str, torch.Tensor]:
+        index, mirror = key if isinstance(key, tuple) else (key, False)
         sample = load_sample(self.paths[index])
-        return {
+        item = {
             "input": torch.from_numpy(dense_input(sample.voxels, sample.map_masks, self.cfg)),
             "ego_future": torch.from_numpy(sample.ego_future),
             "v0": torch.tensor(sample.v0, dtype=torch.float32),
@@ -56,6 +59,37 @@ class NmpDataset(Dataset):
             "obstacles": torch.from_numpy(obstacle_masks(sample, self.cfg)),
             "drivable": torch.from_numpy(sample.map_masks[0].astype(bool)),
         }
+        return _mirror(item) if mirror else item
+
+
+def _mirror(item: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """y -> -y for the whole sample. Columns run along y over a range symmetric about the ego (NmpConfig checks it),
+    so flipping them is exact; the ego footprint is symmetric too, so the ego stays where it is."""
+    boxes, future = item["boxes"].clone(), item["ego_future"].clone()
+    boxes[..., 1] *= -1  # y
+    boxes[..., 4] *= -1  # yaw
+    future[:, 1:] *= -1  # y, yaw
+    flipped = {key: item[key].flip(-1) for key in ("input", "obstacles", "drivable")}
+    return {**item, **flipped, "boxes": boxes, "ego_future": future, "k0": -item["k0"]}
+
+
+class MirrorSampler(Sampler):
+    """A shuffle plus one mirror coin per sample, all drawn from `order` in the main process.
+
+    Drawing the coins here rather than in DataLoader workers is what keeps augmentation reproducible: train.fit
+    reseeds `order` each epoch, so a resumed run mirrors exactly what an uninterrupted one would have.
+    """
+
+    def __init__(self, size: int, p: float, order: torch.Generator):
+        self.size, self.p, self.order = size, p, order
+
+    def __len__(self) -> int:
+        return self.size
+
+    def __iter__(self):
+        indices = torch.randperm(self.size, generator=self.order).tolist()
+        coins = (torch.rand(self.size, generator=self.order) < self.p).tolist()
+        return iter(zip(indices, coins))
 
 
 def collate(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
@@ -74,9 +108,11 @@ def collate(items: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
 def make_loader(
     cache_dir: Path, split: str, cfg: NmpConfig, batch_size: int, workers: int, limit: int | None, shuffle: bool, order: torch.Generator | None = None
 ) -> DataLoader:
-    """`order` alone drives the shuffle, so reseeding it before an epoch fixes that epoch's order (train.fit relies on it)."""
-    dataset = NmpDataset(cache_dir, split, cfg)
-    if limit is not None:
-        dataset = Subset(dataset, range(min(limit, len(dataset))))
-    sampler = RandomSampler(dataset, generator=order) if shuffle else None
+    """`order` alone drives the shuffle and mirroring, so reseeding it before an epoch fixes that epoch (train.fit relies
+    on it). Without one, every loader gets a freshly seeded generator, as RandomSampler did."""
+    dataset = NmpDataset(cache_dir, split, cfg, limit)
+    if shuffle and order is None:
+        order = torch.Generator()
+        order.seed()
+    sampler = MirrorSampler(len(dataset), cfg.mirror_p, order) if shuffle else None
     return DataLoader(dataset, batch_size, sampler=sampler, num_workers=workers, collate_fn=collate, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)
