@@ -30,7 +30,6 @@ class PlanResult:
     costs: np.ndarray         # (N,) summed cost per candidate
     cost_volume: np.ndarray   # (T, H, W)
     detections: list[Box3D]
-    forecasts: np.ndarray     # (K, T+1, 3) x, y, yaw per detection and step
     v0: float
 
 
@@ -62,7 +61,7 @@ def decode_detections(out: NmpOutput, cfg: NmpConfig, threshold: float = 0.3) ->
     boxes, forecasts = [], []
     for b in range(score.shape[0]):
         rows, cols = torch.nonzero(peaks[b, 0], as_tuple=True)
-        reg = out.box_reg[b].float().view(steps, REG_PER_STEP, *score.shape[2:])[:, :, rows, cols]  # (T+1, 6, K)
+        reg = out.box_reg[b].float().view(steps, REG_PER_STEP, *score.shape[2:])[:, :, rows, cols]  # (T+1, REG_PER_STEP, K)
         xy = centers[rows, cols].T[None] + OFFSET_SCALE_M * reg[:, :2]                              # (T+1, 2, K)
         axis = 0.5 * torch.atan2(reg[:, 6], reg[:, 7])                                              # (T+1, K)
         # The axis is reliable even for a parked car; the full angle only chooses which end is the front.
@@ -107,13 +106,12 @@ class NmpPlanner:
         )[0]
         cost = out.cost[0].float()
         best, costs = select_plan(cost, candidates, self.cfg.grid)
-        boxes, forecasts = decode_detections(out, self.cfg)
+        boxes, _ = decode_detections(out, self.cfg)  # the view forecasts with the tracker, which measured better
         return PlanResult(
             plan=candidates[best].cpu().numpy(),
             candidates=candidates.cpu().numpy(),
             costs=costs.cpu().numpy(),
             cost_volume=cost.cpu().numpy(),
             detections=boxes[0],
-            forecasts=forecasts[0],
             v0=v0,
         )

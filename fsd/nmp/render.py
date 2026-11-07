@@ -183,7 +183,7 @@ def _annotate(ax, frame: SurroundFrame, result: PlanResult | None, logged: np.nd
     if result is not None:
         handles += [
             Line2D([], [], color=CANDIDATE, lw=1, label=f"rejected samples ({SHOWN_CANDIDATES} of {len(result.candidates)})"),
-            Patch(fc=to_rgba(VEHICLE, 0.18), ec=VEHICLE, label="detected vehicle + 3 s forecast"),
+            Patch(fc=to_rgba(VEHICLE, 0.18), ec=VEHICLE, label="detected vehicle, tracked + 3 s forecast"),
         ]
     handles.append(Patch(fc=EGO, label="ego"))
     ax.legend(handles=handles, loc="upper left", fontsize=8, framealpha=0.92, edgecolor="#d0d0d0")

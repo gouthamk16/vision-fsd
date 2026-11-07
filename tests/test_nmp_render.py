@@ -21,7 +21,6 @@ def _result(plan: np.ndarray) -> PlanResult:
         costs=np.zeros(4, np.float32),
         cost_volume=np.random.default_rng(0).normal(size=(CFG.horizon, *CFG.grid.shape)).astype(np.float32),
         detections=[],
-        forecasts=np.zeros((0, CFG.horizon + 1, 3), np.float32),
         v0=0.0,
     )
 
