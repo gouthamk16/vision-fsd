@@ -70,9 +70,10 @@ def _draw_motion(image: np.ndarray, view: BevGrid, objects: list[TrackedObject],
     """Velocity arrows (1 s lookahead) and the last predicted footprint. Returns moving count."""
     moving = [obj for obj in objects if len(obj.future_xy_ego)]
     for obj in moving:
-        center = obj.box.center_ego[:2]
+        # Motion is the filter's, so it starts from the filtered pose, not the raw detection.
+        center = obj.smoothed.center_ego[:2]
         draw_arrow(image, view, center, center + obj.velocity_ego, MOTION_COLOR, 2)
-        draw_polygon(image, view, obj.box.footprint + (obj.future_xy_ego[-1] - center), MOTION_COLOR, 1)
+        draw_polygon(image, view, obj.smoothed.footprint + (obj.future_xy_ego[-1] - center), MOTION_COLOR, 1)
         col, row = view.to_pixels((center + obj.velocity_ego)[None])[0]
         place_label(image, f"{obj.speed_mps:.1f} m/s", (int(col) + 4, int(row)), MOTION_COLOR, placed)
     return len(moving)
