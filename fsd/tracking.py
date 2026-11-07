@@ -54,12 +54,12 @@ class _EkfTracker:
         self.min_speed_mps = min_speed_mps
         self.max_age_s = max_age_s
         self._scene_token: str | None = None
-        self._count = 0
         self.reset()
 
     def reset(self) -> None:
         self._tracks: dict[str, _Track] = {}
         self._now: int | None = None
+        self._count = 0
 
     def _associate(self, boxes: list[Box3D], measured: np.ndarray) -> dict[int, str]:
         """Detection index -> existing track id; `measured` is each detection's global (px, py, yaw)."""
@@ -74,10 +74,12 @@ class _EkfTracker:
 
     def update(self, frame: SurroundFrame, boxes: list[Box3D]) -> list[TrackedObject]:
         """One TrackedObject per detection, in order."""
-        if frame.scene_token != self._scene_token:
+        # A new scene, or a frame no later than the last (repeated or rewound), starts over: updating without a
+        # predict step would make the filters overconfident and age tracks backwards.
+        if frame.scene_token != self._scene_token or (self._now is not None and frame.timestamp_us <= self._now):
             self.reset()
             self._scene_token = frame.scene_token
-        if self._now is not None and frame.timestamp_us > self._now:
+        if self._now is not None:
             for track in self._tracks.values():
                 track.ekf.predict((frame.timestamp_us - self._now) / 1_000_000.0)
         self._now = frame.timestamp_us
@@ -92,8 +94,9 @@ class _EkfTracker:
                 self._tracks[track_id] = _Track(box.class_name, CtrvEkf(*z), frame.timestamp_us)
             else:
                 track = self._tracks[track_id]
-                # A box looks the same from either end: read a reversed heading as the track's own.
-                if abs(wrap_angle(z[2] - track.ekf.x[3])) > math.pi / 2:
+                # A box looks the same from either end: read a reversed heading (~180 deg off) as the track's own.
+                # Real turns stay well under 120 deg from the predicted heading, even after coasting 1.2 s.
+                if abs(wrap_angle(z[2] - track.ekf.x[3])) > math.radians(120.0):
                     z[2] = wrap_angle(z[2] + math.pi)
                 track.ekf.update(z)
                 track.seen_us = frame.timestamp_us

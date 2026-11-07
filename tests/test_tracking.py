@@ -116,3 +116,26 @@ def test_gt_boxes_without_an_instance_token_do_not_share_a_track():
     out = tracker.update(_frame(1), [_box([22.5, 0.0, 0.0]), _box([-10.0, 5.0, 0.0])])
     assert [o.speed_mps for o in out] == [0.0, 0.0]
     assert np.allclose(out[0].smoothed.center_ego[:2], [22.5, 0.0])
+
+
+def test_time_going_backwards_starts_over():
+    # A repeated or earlier frame must not update the filters without a predict step.
+    tracker = PredictionVelocityTracker()
+    for i in range(6):
+        tracker.update(_frame(i), [_box([20.0 + 2.5 * i, 0.0, 0.0])])
+    again = tracker.update(_frame(5), [_box([32.5, 0.0, 0.0])])[0]
+    assert again.speed_mps == 0.0 and again.track_id == "p0"
+
+
+def test_a_sharp_turn_is_not_mistaken_for_a_reversed_box():
+    tracker = PredictionVelocityTracker()
+    for i in range(6):
+        tracker.update(_frame(i), [_box([20.0 + 2.5 * i, 0.0, 0.0])])
+    turned = tracker.update(_frame(6), [_box([35.0, 1.0, 0.0], yaw=math.radians(100.0))])[0]
+    assert turned.smoothed.yaw_ego > 0.0  # pulled towards +100 deg, not folded to -80 deg
+
+
+def test_track_ids_restart_with_each_scene():
+    tracker = PredictionVelocityTracker()
+    tracker.update(_frame(0), [_box([20.0, 0.0, 0.0]), _box([30.0, 5.0, 0.0])])
+    assert tracker.update(_frame(1, scene="next"), [_box([20.0, 0.0, 0.0])])[0].track_id == "p0"
