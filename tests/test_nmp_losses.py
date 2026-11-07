@@ -68,6 +68,12 @@ def test_offroad_adds_gamma_everywhere_off_the_drivable_area():
     assert torch.all(gamma == 100.0)
 
 
+def test_offroad_not_counted_past_the_grid():
+    far = _traj(20.0)  # the whole body lies beyond the 8 m grid edge, where the map can't judge
+    gamma = violations(far[None, None], torch.zeros(1, T, H, W, dtype=torch.bool), torch.zeros(1, H, W, dtype=torch.bool), CFG)
+    assert torch.all(gamma == 0.0)
+
+
 def test_out_of_grid_points_clamp():
     cost = torch.arange(T * H * W, dtype=torch.float32).reshape(1, T, H, W)
     far = torch.tensor([[[500.0, 0.0, 0.0]] * T])
@@ -81,7 +87,7 @@ def _boxes(valid_now: bool):
     for k in range(T + 1):
         boxes[0, 0, k] = torch.tensor([2.0 + k, 1.0, 2.0, 4.6, math.radians(30)])
     valid = torch.full((1, 1, T + 1), valid_now)
-    return boxes, valid, torch.tensor([[CLASS_NAMES.index("car")]])
+    return boxes, valid, torch.tensor([[CLASS_NAMES.index("car")]]), torch.tensor([[12]])
 
 
 def test_detection_loss_finite_without_vehicles():
@@ -105,14 +111,20 @@ def test_target_encoding_round_trip():
 
 
 def test_targets_for_a_batch_without_any_boxes():
-    cls, reg, mask = detection_targets(torch.zeros(2, 0, T + 1, 5), torch.zeros(2, 0, T + 1, dtype=torch.bool), torch.zeros(2, 0, dtype=torch.long), CFG)
+    cls, reg, mask = detection_targets(torch.zeros(2, 0, T + 1, 5), torch.zeros(2, 0, T + 1, dtype=torch.bool), torch.zeros(2, 0, dtype=torch.long), torch.zeros(2, 0, dtype=torch.long), CFG)
     assert cls.shape == (2, 1, H // 4, W // 4) and reg.shape == (2, (T + 1) * 6, H // 4, W // 4) and not mask.any()
 
 
 def test_targets_mask_only_the_step_a_vehicle_is_missing():
-    boxes, valid, cls_idx = _boxes(True)
+    boxes, valid, cls_idx, points = _boxes(True)
     valid[0, 0, 3] = False  # occluded or out of the scene at step 3 only
-    cls, reg, mask = detection_targets(boxes, valid, cls_idx, CFG)
+    cls, reg, mask = detection_targets(boxes, valid, cls_idx, points, CFG)
     i, j = map(int, torch.nonzero(cls[0, 0])[0])
     assert mask[0, :, i, j].tolist() == [True, True, True, False, True, True, True]
     assert not reg[0, 18:24, i, j].any()
+
+
+def test_targets_skip_a_vehicle_no_lidar_point_hit():
+    boxes, valid, cls_idx, _ = _boxes(True)
+    cls, reg, mask = detection_targets(boxes, valid, cls_idx, torch.tensor([[0]]), CFG)
+    assert cls.sum() == 0 and not mask.any()

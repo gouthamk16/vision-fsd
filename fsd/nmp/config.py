@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from fsd.bev import BevGrid
+from fsd.ego_motion import EGO_FOOTPRINT
 from fsd.nuscenes_map import MAP_LAYERS
 
 
@@ -34,10 +35,19 @@ class NmpConfig:
     p_circle: float = 0.25
     negative_free_init_p: float = 0.8
     init_speed_range: tuple[float, float] = (0.0, 15.0)
+    # Training obstacles grow by a little more than the ego half-width, so the ego body can be tested as a few
+    # points on its axis (losses.body_points).
+    obstacle_dilation: float = 1.0
     gamma_collision: float = 200.0
     gamma_offroad: float = 100.0
     cost_clip: float = 1000.0
     beta: float = 0.01
+
+    def __post_init__(self):
+        cells = self.obstacle_dilation / self.resolution
+        if abs(cells - round(cells)) > 1e-6 or self.obstacle_dilation <= EGO_FOOTPRINT[1][1]:
+            raise ValueError(f"obstacle_dilation {self.obstacle_dilation} m must be a whole number of {self.resolution} m cells "
+                             f"and exceed the ego half-width {EGO_FOOTPRINT[1][1]} m, or the body points miss overlaps")
 
     @property
     def grid(self) -> BevGrid:

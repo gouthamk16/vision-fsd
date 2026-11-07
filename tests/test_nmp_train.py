@@ -12,12 +12,12 @@ from fsd.nmp.train import fit
 SMALL = replace(NmpConfig(), x_range=(-8.0, 8.0), y_range=(-4.8, 4.8))
 
 
-def _write_cache(root, rng):
+def _write_cache(root, rng, count=4):
     h, w = SMALL.grid.shape
     future = np.stack([2.0 * SMALL.times, np.zeros(6), np.zeros(6)], axis=1).astype(np.float32)  # 2 m/s straight
     for split in ("train", "val"):
-        (root / split).mkdir(parents=True)
-        for i in range(4):
+        (root / split).mkdir(parents=True, exist_ok=True)
+        for i in range(count):
             voxels = np.unique(rng.integers(0, SMALL.n_sweeps * SMALL.z_bins * h * w, 200)).astype(np.uint32)
             masks = np.zeros((8, h, w), np.uint8)
             masks[0] = 1  # all drivable: only the max-margin term shapes the cost
@@ -66,3 +66,12 @@ def test_resume_refuses_a_missing_checkpoint_or_a_changed_run(tmp_path):
     fit(SMALL, tmp_path / "cache", tmp_path / "out", epochs=1, **args)
     with pytest.raises(ValueError, match="epochs"):
         fit(SMALL, tmp_path / "cache", tmp_path / "out", epochs=3, resume=True, **args)
+
+
+def test_resume_refuses_a_rebuilt_train_set(tmp_path):
+    _write_cache(tmp_path / "cache", np.random.default_rng(0))
+    args = dict(epochs=2, batch_size=2, lr=1e-3, workers=0, device="cpu")
+    fit(SMALL, tmp_path / "cache", tmp_path / "out", **args)
+    _write_cache(tmp_path / "cache", np.random.default_rng(1), count=6)  # e.g. another blob extracted, cache rebuilt
+    with pytest.raises(ValueError, match="train_samples"):
+        fit(SMALL, tmp_path / "cache", tmp_path / "out", resume=True, **args)
