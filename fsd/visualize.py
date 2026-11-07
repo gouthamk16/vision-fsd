@@ -23,6 +23,7 @@ from fsd.nmp.render import render_planner_bev
 from fsd.nuscenes_map import NuScenesMapRenderer
 from fsd.object_detection import NuScenesAnnotationLoader, PredictionLoader
 from fsd.occupancy import TemporalOccupancyMapper, render_occupancy_bev
+from fsd.tracking import PredictionVelocityTracker
 from fsd.world_model import WorldModelBuilder, render_world_model_bev
 
 LSS_VIEWS = {"lss_bev", "lss_lidar_bev"}
@@ -51,6 +52,8 @@ class _Context:
     planner: NmpPlanner | None = None
     # The planner's map input is needed even when the map background is off (--no-map).
     planner_map: NuScenesMapRenderer | None = None
+    # The NMP decodes boxes from each frame alone; tracking them smooths the jitter and gives filtered motion.
+    planner_tracker: PredictionVelocityTracker | None = None
     loader: NuScenesSceneLoader | None = None
 
 
@@ -96,7 +99,8 @@ def _planner(p: _Products, c: _Context) -> np.ndarray:
     result = c.planner.plan(p.frame, p.lidar, c.planner_map)
     future = [pose.relative_to(p.frame.ego_pose) for pose in c.loader.future_ego_poses(p.frame, c.planner.cfg.horizon)]
     logged = np.array([[q.translation[0], q.translation[1], q.yaw] for q in future]) if future else None
-    return render_planner_bev(p.frame, p.points, result, c.planner.cfg.grid, c.map_renderer, logged)
+    tracked = c.planner_tracker.update(p.frame, result.detections if result else [])
+    return render_planner_bev(p.frame, p.points, result, c.planner.cfg.grid, c.map_renderer, logged, tracked)
 
 
 RENDERERS: dict[str, Callable[[_Products, _Context], np.ndarray]] = {
@@ -146,6 +150,7 @@ def _build_context(views: list[str], loader: NuScenesSceneLoader, opts: argparse
     if "planner_bev" in views:
         ctx.planner = NmpPlanner(opts.nmp_weights)
         ctx.planner_map = ctx.map_renderer or NuScenesMapRenderer(loader.dataroot)
+        ctx.planner_tracker = PredictionVelocityTracker(horizons_s=tuple(ctx.planner.cfg.times))
         ctx.loader = loader
     return ctx
 

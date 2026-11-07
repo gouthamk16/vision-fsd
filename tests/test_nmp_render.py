@@ -8,6 +8,8 @@ from fsd.data import CameraFrame, Pose
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.planner import PlanResult
 from fsd.nmp.render import _camera_pixels, render_planner_bev
+from fsd.object_detection import Box3D
+from fsd.tracking import TrackedObject
 
 CFG = NmpConfig()
 
@@ -63,3 +65,12 @@ def test_render_with_front_camera(tmp_path):
 def test_render_without_a_plan_while_history_fills():
     image = render_planner_bev(make_frame(yaw_pose()), np.zeros((0, 3)), None, CFG.grid)
     assert image.dtype == np.uint8 and image.shape[2] == 3
+
+
+def test_tracked_vehicles_are_drawn_where_the_filter_puts_them():
+    car = Box3D("car", np.array([12.0, 3.0, 0.8]), np.array([1.9, 4.6, 1.6]), 0.0, 0.9)
+    moving = TrackedObject(car, "p0", np.array([5.0, 0.0]), 5.0, np.array([[12.0 + 5.0 * t, 3.0] for t in CFG.times]), car)
+    plan = np.zeros((CFG.horizon, 3), np.float32)
+    plain = render_planner_bev(make_frame(yaw_pose()), np.zeros((0, 3)), _result(plan), CFG.grid)
+    tracked = render_planner_bev(make_frame(yaw_pose()), np.zeros((0, 3)), _result(plan), CFG.grid, tracked=[moving])
+    assert not np.array_equal(plain, tracked)
