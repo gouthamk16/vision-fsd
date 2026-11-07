@@ -210,7 +210,8 @@ def render_planner_bev(
     cost_grid: BevGrid,
     map_renderer: NuScenesMapRenderer | None = None,
     logged: np.ndarray | None = None,
-    tracked: list[TrackedObject] = (),
+    *,
+    tracked: list[TrackedObject],
 ) -> np.ndarray:
     """BGR image; `result` is None while the planner waits for history, `logged` the human's future (T, 3) if known,
     `tracked` the planner's detections after the tracker (drawn instead of the raw per-frame boxes)."""

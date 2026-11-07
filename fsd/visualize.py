@@ -100,7 +100,7 @@ def _planner(p: _Products, c: _Context) -> np.ndarray:
     future = [pose.relative_to(p.frame.ego_pose) for pose in c.loader.future_ego_poses(p.frame, c.planner.cfg.horizon)]
     logged = np.array([[q.translation[0], q.translation[1], q.yaw] for q in future]) if future else None
     tracked = c.planner_tracker.update(p.frame, result.detections if result else [])
-    return render_planner_bev(p.frame, p.points, result, c.planner.cfg.grid, c.map_renderer, logged, tracked)
+    return render_planner_bev(p.frame, p.points, result, c.planner.cfg.grid, c.map_renderer, logged, tracked=tracked)
 
 
 RENDERERS: dict[str, Callable[[_Products, _Context], np.ndarray]] = {
