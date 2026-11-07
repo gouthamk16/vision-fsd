@@ -21,7 +21,7 @@ from fsd.nmp.config import NmpConfig
 from fsd.nmp.dataset import make_loader
 from fsd.nmp.evaluate import evaluate, report
 from fsd.nmp.losses import detection_loss, detection_targets, planning_loss, violations
-from fsd.nmp.model import NeuralMotionPlanner
+from fsd.nmp.model import NeuralMotionPlanner, load_weights
 from fsd.nmp.samples import build_scene_samples, save_sample, split_scenes
 from fsd.nmp.trajectories import sample_trajectories
 from fsd.nuscenes_map import NuScenesMapRenderer
@@ -135,7 +135,7 @@ def _restore(path: Path, run: dict, model, optimizer, scheduler, generator: torc
         raise ValueError(f"{path} was written before fit could resume; start a fresh run instead")
     if state["run"] != run:
         raise ValueError(f"--resume must repeat the original run's settings {state['run']}, got {run}")
-    model.load_state_dict(state["model"])
+    load_weights(model, state["model"], path)
     optimizer.load_state_dict(state["optimizer"])
     scheduler.load_state_dict(state["scheduler"])
     generator.set_state(state["generator"])

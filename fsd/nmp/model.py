@@ -69,3 +69,12 @@ class NeuralMotionPlanner(nn.Module):
         features = self.fuse(torch.cat(scales, dim=1))
         cost = self.cost_head(features).clamp(-self.cfg.cost_clip, self.cfg.cost_clip)
         return NmpOutput(self.cls_head(features), self.reg_head(features), cost)
+
+
+def load_weights(model: NeuralMotionPlanner, state: dict, source: object) -> None:
+    """Load a checkpoint's weights; a layout mismatch means it predates a head change, which only retraining fixes."""
+    try:
+        model.load_state_dict(state)
+    except RuntimeError as err:
+        raise ValueError(f"{source} does not fit this model (written before a head change?): retrain, "
+                         "or check out the code it was trained with") from err

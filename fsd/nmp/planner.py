@@ -14,7 +14,7 @@ from fsd.bev import BevGrid
 from fsd.data import LidarFrame, SurroundFrame
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.losses import OFFSET_SCALE_M, cell_centers, lookup_costs
-from fsd.nmp.model import REG_PER_STEP, NeuralMotionPlanner, NmpOutput
+from fsd.nmp.model import REG_PER_STEP, NeuralMotionPlanner, NmpOutput, load_weights
 from fsd.nmp.samples import dense_input, ego_state, sweep_points, voxelize
 from fsd.nmp.trajectories import sample_trajectories
 from fsd.nuscenes_map import NuScenesMapRenderer
@@ -85,7 +85,7 @@ class NmpPlanner:
         self.cfg = cfg
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model = NeuralMotionPlanner(cfg)
-        self.model.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True)["model"])
+        load_weights(self.model, torch.load(weights, map_location="cpu", weights_only=True)["model"], weights)
         self.model.to(self.device).eval()
         self.generator = torch.Generator(device=self.device).manual_seed(0)
 

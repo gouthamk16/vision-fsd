@@ -3,6 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from conftest import make_frame, yaw_pose
@@ -189,3 +190,12 @@ def test_match_reports_the_heading_error_of_each_match():
     forecast = np.tile([3.0, 0.2, yaw], (1, T + 1, 1))
     *_, headings = _match(det, forecast, gt, np.ones((1, T + 1), bool), np.array([car]), np.array([9]), CFG)
     assert np.allclose(headings, [170.0])
+
+
+def test_a_checkpoint_from_an_older_head_says_to_retrain(tmp_path):
+    state = NeuralMotionPlanner(CFG).state_dict()
+    state["reg_head.1.weight"] = state["reg_head.1.weight"][: (T + 1) * 6]  # 6 channels per step, before the axis channels
+    state["reg_head.1.bias"] = state["reg_head.1.bias"][: (T + 1) * 6]
+    torch.save({"model": state}, tmp_path / "old.pt")
+    with pytest.raises(ValueError, match="retrain"):
+        NmpPlanner(tmp_path / "old.pt", CFG, device="cpu")

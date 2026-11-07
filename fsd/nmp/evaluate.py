@@ -11,7 +11,7 @@ from fsd.ego_motion import wrap_angle
 from fsd.nmp.config import NmpConfig
 from fsd.nmp.dataset import make_loader
 from fsd.nmp.metrics import REPORT_SECONDS, PlanMetrics, constant_velocity_plan
-from fsd.nmp.model import NeuralMotionPlanner
+from fsd.nmp.model import NeuralMotionPlanner, load_weights
 from fsd.nmp.planner import decode_detections, select_plan
 from fsd.nmp.samples import CLASS_NAMES
 from fsd.nmp.trajectories import sample_trajectories
@@ -90,7 +90,7 @@ def average_precision(scores: list[float], tps: list[bool], n_gt: int) -> float:
 def report(weights: Path, cache_dir: Path, split: str, cfg: NmpConfig) -> str:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = NeuralMotionPlanner(cfg).to(device)
-    model.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True)["model"])
+    load_weights(model, torch.load(weights, map_location="cpu", weights_only=True)["model"], weights)
     nmp, cv, expert = PlanMetrics(), PlanMetrics(), PlanMetrics()
     scores, tps, errors, n_gt, headings, travel = [], [], [], 0, [], []
     for batch, out, plans in _plans(model, make_loader(cache_dir, split, cfg, 4, 4, None, False), cfg):
