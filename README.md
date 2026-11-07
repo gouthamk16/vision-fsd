@@ -84,11 +84,12 @@ Trained 20 epochs on 139 nuScenes train scenes (4,396 samples), evaluated on the
 |---|---|---|---|
 | human driver (logged) | 0 / 0 / 0 | 0.00 / 0.00 / 0.00 | 0.00 |
 | constant velocity | 0.40 / 1.16 / 2.33 | 0.00 / 0.41 / 2.24 | 5.70 |
-| **NMP, last epoch** | 0.49 / 1.65 / 3.60 | 0.00 / 0.10 / 1.02 | 0.00 |
-| NMP, best epoch by val collision (13) | 0.49 / 1.65 / 3.60 | 0.00 / 0.00 / 0.61 | 0.00 |
+| **NMP (last epoch, also the best by val collision)** | 0.45 / 1.48 / 3.22 | 0.00 / 0.10 / 0.41 | 0.00 |
 | NMP reference ([Khurana et al., ECCV 2022](https://arxiv.org/abs/2210.01917), full val, no map) | 0.53 / 1.25 / 2.67 | 0.04 / 0.12 / 0.87 | - |
 
-The last epoch is the honest number; the best epoch was picked on the same val split, so its collision rate is optimistic. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), and it travels 17.5 m in 3 s against the human's 19.2 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m is 0.45, scored like the nuScenes detection eval: vehicles within 50 m that LiDAR actually hit and that lie inside the model's grid. Implementation in [fsd/nmp/](fsd/nmp/).
+The last epoch was also the best one on val collisions, so no number here is picked on the split it is reported on. The planner stays on the road and out of other cars far better than driving straight (the human row shows the metrics don't penalise normal driving), with a 3 s collision rate under half the reference's, and it travels 17.8 m in 3 s against the human's 19.2 m, so it is not avoiding collisions by stopping. It is further from the human trajectory than both constant velocity and the reference. The reference uses the same loss, so the loss alone doesn't explain that; less data (a fifth of nuScenes, 31 of 150 val scenes) and the differences between our setup and theirs are candidates, not a diagnosis. Vehicle AP at 2 m is 0.74, scored like the nuScenes detection eval: vehicles within 50 m that LiDAR actually hit and that lie inside the model's grid.
+
+Detection follows CenterPoint rather than the paper's box cells: one Gaussian peak marks each vehicle's centre, the heading is predicted as an axis plus which end is the front (so a parked car's two look-alike directions can't average into a sideways box), and training samples are mirrored left-right half the time. Against the earlier every-cell-in-the-box head, on the same val samples at the view's 0.3 threshold: recall 47% → 69%, duplicate boxes 12 → 4 and false boxes 46 → 25 per 100 vehicles, median centre error 0.88 → 0.42 m, and parked cars' median heading error 58° → 7°. About 30% of parked cars still get front and back swapped; their footprint is the same either way. The `planner_bev` view passes the detections through the Kalman-filter tracker above, whose forecasts beat the network's own (L2 of matched vehicles at 1/2/3 s: 1.67 / 2.99 / 4.35 m vs 1.77 / 3.26 / 4.77 m; assuming they stay put: 2.45 / 4.47 / 6.33 m). Implementation in [fsd/nmp/](fsd/nmp/).
 
 ### Results
 
@@ -126,7 +127,7 @@ The last epoch is the honest number; the best epoch was picked on the same val s
   <tr>
     <td colspan="2" align="center">
       <img src="results/nuscenes_planner_bev.jpg" width="100%"><br>
-      <sub>Neural motion planner on an unseen val scene (right turn, 10 Hz) - left: the chosen 3 s plan (green) against what the human actually drove (orange, dashed), rejected samples (light blue) and detected vehicles with 3 s forecasts (blue); right: both paths projected into the front camera, and the learned cost the plan minimises at 1, 2 and 3 s (dark = preferred)</sub>
+      <sub>Neural motion planner on an unseen val scene (right turn, 10 Hz) - left: the chosen 3 s plan (green) against what the human actually drove (orange, dashed), rejected samples (light blue) and detected vehicles, tracked over time, with 3 s forecasts (blue); right: both paths projected into the front camera, and the learned cost the plan minimises at 1, 2 and 3 s (dark = preferred)</sub>
     </td>
   </tr>
   <tr>
